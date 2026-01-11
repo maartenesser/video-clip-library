@@ -1,0 +1,27 @@
+{
+  "name": "video-clip-library",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Video clip library for social media ads - transforms long videos into tagged short clips",
+  "scripts": {
+    "dev": "pnpm --filter web dev",
+    "build": "pnpm --filter web build",
+    "test": "pnpm -r test",
+    "test:database": "pnpm --filter @video-clip-library/database test",
+    "test:storage": "pnpm --filter @video-clip-library/storage test",
+    "test:api": "pnpm --filter web test:api",
+    "test:ui": "pnpm --filter web test:ui",
+    "test:e2e": "pnpm --filter web test:e2e",
+    "test:workers": "cd workers/cloudflare && pytest",
+    "lint": "pnpm -r lint",
+    "format": "prettier --write ."
+  },
+  "devDependencies": {
+    "prettier": "^3.2.0",
+    "typescript": "^5.3.0"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=8.0.0"
+  }
+}
