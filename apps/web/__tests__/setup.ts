@@ -1,0 +1,71 @@
+import { vi, beforeEach, afterEach } from 'vitest';
+import { createMockDatabaseClient } from './mocks/database';
+import { createMockStorageClient } from './mocks/storage';
+
+// Set test environment
+process.env.NODE_ENV = 'test';
+
+// Mock environment variables
+process.env.SUPABASE_URL = 'https://test.supabase.co';
+process.env.SUPABASE_SERVICE_ROLE_KEY = 'test-service-role-key';
+process.env.R2_ACCOUNT_ID = 'test-account-id';
+process.env.R2_ACCESS_KEY_ID = 'test-access-key-id';
+process.env.R2_SECRET_ACCESS_KEY = 'test-secret-access-key';
+process.env.R2_BUCKET_NAME = 'test-bucket';
+process.env.R2_PUBLIC_URL = 'https://storage.example.com';
+process.env.CLOUDFLARE_WEBHOOK_SECRET = 'test-webhook-secret';
+
+// Create mock instances
+export const mockDb = createMockDatabaseClient();
+export const mockStorage = createMockStorageClient();
+
+// Mock the lib modules
+vi.mock('@/lib/database', () => ({
+  getDatabase: () => mockDb,
+  resetDatabase: vi.fn(),
+  setDatabase: vi.fn(),
+}));
+
+vi.mock('@/lib/storage', () => ({
+  getStorage: () => mockStorage,
+  resetStorage: vi.fn(),
+  setStorage: vi.fn(),
+}));
+
+// Reset mocks before each test
+beforeEach(() => {
+  vi.clearAllMocks();
+});
+
+// Clean up after each test
+afterEach(() => {
+  vi.resetAllMocks();
+});
+
+// Helper to create a mock Request
+export function createMockRequest(
+  url: string,
+  options: {
+    method?: string;
+    body?: unknown;
+    headers?: Record<string, string>;
+  } = {}
+): Request {
+  const { method = 'GET', body, headers = {} } = options;
+
+  const requestHeaders = new Headers(headers);
+  if (body && !requestHeaders.has('content-type')) {
+    requestHeaders.set('content-type', 'application/json');
+  }
+
+  return new Request(url, {
+    method,
+    headers: requestHeaders,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+}
+
+// Helper to parse response JSON
+export async function parseResponse<T>(response: Response): Promise<T> {
+  return response.json();
+}
