@@ -1,0 +1,419 @@
+"""Video processing pipeline orchestrator."""
+
+import asyncio
+import tempfile
+import time
+import uuid
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+import httpx
+import structlog
+
+from .models import (
+    ClipTag,
+    PipelineResult,
+    ProcessedClip,
+    ProcessingStatus,
+    TagScore,
+    TranscriptResult,
+    WebhookPayload,
+)
+from .r2_client import R2Client, get_r2_client
+from .scene_detect import SceneDetector
+from .split_video import VideoSplitter, create_clip_definitions
+from .tagger import ClipTagger, create_clip_contexts
+from .transcribe import Transcriber
+
+logger = structlog.get_logger(__name__)
+
+
+class PipelineError(Exception):
+    """Error during pipeline execution."""
+
+    pass
+
+
+class VideoPipeline:
+    """Orchestrates the full video processing pipeline."""
+
+    def __init__(
+        self,
+        r2_client: Optional[R2Client] = None,
+        transcriber: Optional[Transcriber] = None,
+        scene_detector: Optional[SceneDetector] = None,
+        video_splitter: Optional[VideoSplitter] = None,
+        clip_tagger: Optional[ClipTagger] = None,
+        output_bucket: str = "processed-clips",
+    ):
+        """Initialize the pipeline.
+
+        Args:
+            r2_client: R2 client for storage operations
+            transcriber: Transcriber for audio transcription
+            scene_detector: Scene detector for visual analysis
+            video_splitter: Video splitter for clip extraction
+            clip_tagger: Tagger for content classification
+            output_bucket: Bucket for output clips
+        """
+        self.r2_client = r2_client or get_r2_client()
+        self.transcriber = transcriber
+        self.scene_detector = scene_detector or SceneDetector()
+        self.video_splitter = video_splitter or VideoSplitter()
+        self.clip_tagger = clip_tagger
+        self.output_bucket = output_bucket
+
+        # Lazy initialization for API-dependent components
+        self._transcriber_initialized = False
+        self._tagger_initialized = False
+
+    def _ensure_transcriber(self) -> Transcriber:
+        """Ensure transcriber is initialized."""
+        if self.transcriber is None:
+            self.transcriber = Transcriber()
+        return self.transcriber
+
+    def _ensure_tagger(self) -> ClipTagger:
+        """Ensure tagger is initialized."""
+        if self.clip_tagger is None:
+            self.clip_tagger = ClipTagger()
+        return self.clip_tagger
+
+    async def download_video(self, video_url: str, temp_dir: str) -> str:
+        """Download video from R2 to local storage.
+
+        Args:
+            video_url: R2 URL or key of the video
+            temp_dir: Temporary directory for download
+
+        Returns:
+            Local path to downloaded video
+        """
+        logger.info("Downloading video", video_url=video_url)
+
+        # Extract key from URL if full URL provided
+        if video_url.startswith("http"):
+            # Parse key from URL
+            from urllib.parse import urlparse
+
+            parsed = urlparse(video_url)
+            key = parsed.path.lstrip("/")
+            # Remove bucket name from path if present
+            parts = key.split("/", 1)
+            if len(parts) > 1:
+                key = parts[1]
+        else:
+            key = video_url
+
+        # Determine file extension
+        ext = Path(key).suffix or ".mp4"
+        local_path = str(Path(temp_dir) / f"source{ext}")
+
+        await self.r2_client.download_file(key, local_path)
+        return local_path
+
+    async def upload_clips(
+        self,
+        clips: list,
+        source_id: str,
+    ) -> list[tuple[str, str]]:
+        """Upload processed clips to R2.
+
+        Args:
+            clips: List of ClipResult objects
+            source_id: Source video ID
+
+        Returns:
+            List of (video_url, thumbnail_url) tuples
+        """
+        logger.info("Uploading clips to R2", total=len(clips))
+
+        upload_tasks = []
+        for clip in clips:
+            video_key = f"clips/{source_id}/{clip.clip_id}.mp4"
+            thumb_key = f"clips/{source_id}/{clip.clip_id}_thumb.jpg"
+
+            upload_tasks.append(
+                self.r2_client.upload_file(
+                    clip.video_path,
+                    video_key,
+                    bucket=self.output_bucket,
+                )
+            )
+            upload_tasks.append(
+                self.r2_client.upload_file(
+                    clip.thumbnail_path,
+                    thumb_key,
+                    bucket=self.output_bucket,
+                )
+            )
+
+        results = await asyncio.gather(*upload_tasks, return_exceptions=True)
+
+        # Pair up video and thumbnail URLs
+        urls = []
+        for i in range(0, len(results), 2):
+            video_url = results[i] if not isinstance(results[i], Exception) else ""
+            thumb_url = results[i + 1] if not isinstance(results[i + 1], Exception) else ""
+            urls.append((video_url, thumb_url))
+
+        return urls
+
+    async def call_webhook(
+        self,
+        webhook_url: str,
+        payload: WebhookPayload,
+        timeout: float = 30.0,
+        retries: int = 3,
+    ) -> bool:
+        """Call webhook with pipeline result.
+
+        Args:
+            webhook_url: URL to call
+            payload: Webhook payload
+            timeout: Request timeout in seconds
+            retries: Number of retry attempts
+
+        Returns:
+            True if webhook succeeded, False otherwise
+        """
+        logger.info("Calling webhook", url=webhook_url, status=payload.status)
+
+        async with httpx.AsyncClient() as client:
+            for attempt in range(retries):
+                try:
+                    response = await client.post(
+                        webhook_url,
+                        json=payload.model_dump(mode="json"),
+                        timeout=timeout,
+                        headers={"Content-Type": "application/json"},
+                    )
+
+                    if response.status_code < 400:
+                        logger.info(
+                            "Webhook called successfully",
+                            status_code=response.status_code,
+                        )
+                        return True
+
+                    logger.warning(
+                        "Webhook returned error",
+                        status_code=response.status_code,
+                        attempt=attempt + 1,
+                    )
+
+                except httpx.RequestError as e:
+                    logger.warning(
+                        "Webhook request failed",
+                        error=str(e),
+                        attempt=attempt + 1,
+                    )
+
+                if attempt < retries - 1:
+                    await asyncio.sleep(2**attempt)  # Exponential backoff
+
+        logger.error("Webhook failed after all retries")
+        return False
+
+    async def process_video(
+        self,
+        source_id: str,
+        video_url: str,
+        webhook_url: str,
+        min_clip_duration: float = 3.0,
+        max_clip_duration: float = 20.0,
+        min_scene_length: float = 1.5,
+    ) -> PipelineResult:
+        """Execute the full video processing pipeline.
+
+        Steps:
+        1. Download video from R2
+        2. Transcribe with Whisper
+        3. Detect scenes with PySceneDetect
+        4. Merge transcript + scene boundaries
+        5. Split into clips (3-20 seconds)
+        6. Tag each clip with AI
+        7. Upload clips + thumbnails to R2
+        8. Call webhook with results
+
+        Args:
+            source_id: Unique identifier for the source video
+            video_url: R2 URL or key of the video
+            webhook_url: URL to call when processing completes
+            min_clip_duration: Minimum clip duration in seconds
+            max_clip_duration: Maximum clip duration in seconds
+            min_scene_length: Minimum scene length for detection
+
+        Returns:
+            PipelineResult with all processed clips
+        """
+        job_id = str(uuid.uuid4())
+        start_time = time.time()
+
+        logger.info(
+            "Starting video processing pipeline",
+            job_id=job_id,
+            source_id=source_id,
+            video_url=video_url,
+        )
+
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                # Step 1: Download video
+                logger.info("Step 1: Downloading video", job_id=job_id)
+                video_path = await self.download_video(video_url, temp_dir)
+
+                # Step 2: Transcribe
+                logger.info("Step 2: Transcribing video", job_id=job_id)
+                transcriber = self._ensure_transcriber()
+                transcript = await transcriber.transcribe_video(video_path)
+
+                # Step 3: Detect scenes
+                logger.info("Step 3: Detecting scenes", job_id=job_id)
+                self.scene_detector.min_scene_len = min_scene_length
+                scene_result = self.scene_detector.detect_scenes(video_path)
+
+                # Step 4: Create clip definitions
+                logger.info("Step 4: Creating clip definitions", job_id=job_id)
+                clip_definitions = create_clip_definitions(
+                    scenes=scene_result.scenes,
+                    transcript_segments=transcript.segments,
+                    min_duration=min_clip_duration,
+                    max_duration=max_clip_duration,
+                    source_id=source_id,
+                )
+
+                if not clip_definitions:
+                    raise PipelineError("No valid clips could be created from video")
+
+                # Step 5: Split video into clips
+                logger.info(
+                    "Step 5: Splitting video into clips",
+                    job_id=job_id,
+                    total_clips=len(clip_definitions),
+                )
+                output_dir = str(Path(temp_dir) / "clips")
+                clip_results = await self.video_splitter.split_video(
+                    video_path,
+                    clip_definitions,
+                    output_dir,
+                )
+
+                # Step 6: Tag clips
+                logger.info("Step 6: Tagging clips", job_id=job_id)
+                tagger = self._ensure_tagger()
+                clip_contexts = create_clip_contexts(
+                    clip_results,
+                    transcript.duration,
+                )
+                tag_results = await tagger.tag_clips(clip_contexts)
+
+                # Create tag lookup
+                tag_map = {t.clip_id: t for t in tag_results}
+
+                # Step 7: Upload clips to R2
+                logger.info("Step 7: Uploading clips to R2", job_id=job_id)
+                upload_urls = await self.upload_clips(clip_results, source_id)
+
+                # Step 8: Build final result
+                processed_clips = []
+                for i, clip in enumerate(clip_results):
+                    tag_result = tag_map.get(clip.clip_id)
+                    video_url, thumbnail_url = upload_urls[i] if i < len(upload_urls) else ("", "")
+
+                    processed_clips.append(
+                        ProcessedClip(
+                            clip_id=clip.clip_id,
+                            source_id=source_id,
+                            start_time=clip.start_time,
+                            end_time=clip.end_time,
+                            duration=clip.duration,
+                            transcript=clip.transcript,
+                            video_url=video_url,
+                            thumbnail_url=thumbnail_url,
+                            primary_tag=tag_result.primary_tag if tag_result else ClipTag.B_ROLL,
+                            tags=tag_result.all_tags if tag_result else [],
+                            created_at=datetime.utcnow(),
+                        )
+                    )
+
+                processing_time = time.time() - start_time
+
+                result = PipelineResult(
+                    job_id=job_id,
+                    source_id=source_id,
+                    status=ProcessingStatus.COMPLETED,
+                    total_duration=transcript.duration,
+                    total_clips=len(processed_clips),
+                    clips=processed_clips,
+                    transcript=transcript,
+                    processing_time_seconds=processing_time,
+                )
+
+                logger.info(
+                    "Pipeline completed successfully",
+                    job_id=job_id,
+                    total_clips=len(processed_clips),
+                    processing_time=processing_time,
+                )
+
+                # Call webhook
+                webhook_payload = WebhookPayload(
+                    job_id=job_id,
+                    source_id=source_id,
+                    status=ProcessingStatus.COMPLETED,
+                    result=result,
+                )
+                await self.call_webhook(webhook_url, webhook_payload)
+
+                return result
+
+        except Exception as e:
+            processing_time = time.time() - start_time
+            logger.error(
+                "Pipeline failed",
+                job_id=job_id,
+                error=str(e),
+                processing_time=processing_time,
+            )
+
+            # Call webhook with error
+            error_payload = WebhookPayload(
+                job_id=job_id,
+                source_id=source_id,
+                status=ProcessingStatus.FAILED,
+                error=str(e),
+            )
+            await self.call_webhook(webhook_url, error_payload)
+
+            raise PipelineError(f"Pipeline failed: {str(e)}") from e
+
+
+async def process_video(
+    source_id: str,
+    video_url: str,
+    webhook_url: str,
+    min_clip_duration: float = 3.0,
+    max_clip_duration: float = 20.0,
+    min_scene_length: float = 1.5,
+) -> None:
+    """Process a video through the full pipeline.
+
+    Args:
+        source_id: Unique identifier for the source video
+        video_url: R2 URL or key of the video
+        webhook_url: URL to call when processing completes
+        min_clip_duration: Minimum clip duration in seconds
+        max_clip_duration: Maximum clip duration in seconds
+        min_scene_length: Minimum scene length for detection
+    """
+    pipeline = VideoPipeline()
+    await pipeline.process_video(
+        source_id=source_id,
+        video_url=video_url,
+        webhook_url=webhook_url,
+        min_clip_duration=min_clip_duration,
+        max_clip_duration=max_clip_duration,
+        min_scene_length=min_scene_length,
+    )
