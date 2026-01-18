@@ -4,10 +4,16 @@ import { createChatSchema } from '@/lib/schemas';
 import { handleError, ApiError } from '@/lib/api-utils';
 import { getDatabase } from '@/lib/database';
 
-// Initialize OpenAI client
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+// Lazy-initialize OpenAI client to avoid build-time errors
+let _openai: OpenAI | null = null;
+function getOpenAI(): OpenAI {
+  if (!_openai) {
+    _openai = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY,
+    });
+  }
+  return _openai;
+}
 
 // Chat model to use
 const CHAT_MODEL = 'gpt-4o'; // or 'gpt-5.1' when available
@@ -51,7 +57,7 @@ function addProxyUrls(clips: any[]) {
  */
 async function searchRelevantClips(query: string, limit: number = 10) {
   try {
-    const embeddingResponse = await openai.embeddings.create({
+    const embeddingResponse = await getOpenAI().embeddings.create({
       model: 'text-embedding-3-small',
       input: query,
       dimensions: 384,
@@ -144,7 +150,7 @@ export async function POST(request: NextRequest) {
     ];
 
     // Get AI response
-    const completion = await openai.chat.completions.create({
+    const completion = await getOpenAI().chat.completions.create({
       model: CHAT_MODEL,
       messages,
       max_tokens: 1000,

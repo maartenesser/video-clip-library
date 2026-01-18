@@ -4,10 +4,16 @@ import { semanticSearchSchema } from '@/lib/schemas';
 import { handleError } from '@/lib/api-utils';
 import { getDatabase } from '@/lib/database';
 
-// Initialize OpenAI client
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+// Lazy-initialize OpenAI client to avoid build-time errors
+let _openai: OpenAI | null = null;
+function getOpenAI(): OpenAI {
+  if (!_openai) {
+    _openai = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY,
+    });
+  }
+  return _openai;
+}
 
 // Helper to convert clips to use proxy URLs
 function addProxyUrls(clips: any[]) {
@@ -42,7 +48,7 @@ export async function POST(request: NextRequest) {
     const validated = semanticSearchSchema.parse(body);
 
     // Generate query embedding using OpenAI
-    const embeddingResponse = await openai.embeddings.create({
+    const embeddingResponse = await getOpenAI().embeddings.create({
       model: 'text-embedding-3-small',
       input: validated.query,
       dimensions: 384, // Match the dimension used by all-MiniLM-L6-v2
@@ -52,12 +58,16 @@ export async function POST(request: NextRequest) {
 
     // Search database for similar clips
     const db = getDatabase();
-    const searchResults = await db.searchClipsBySimilarity(
+    let searchResults = await db.searchClipsBySimilarity(
       queryEmbedding,
       validated.threshold,
-      validated.limit,
-      validated.source_id
+      validated.limit
     );
+
+    // Filter by source_id if provided
+    if (validated.source_id) {
+      searchResults = searchResults.filter(clip => clip.source_id === validated.source_id);
+    }
 
     // Add proxy URLs to results
     const clipsWithUrls = addProxyUrls(searchResults);
