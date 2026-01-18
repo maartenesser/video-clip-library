@@ -8,6 +8,7 @@ A Python-based video processing pipeline that runs on Cloudflare Containers. Thi
 - **Scene Detection**: PySceneDetect with adaptive detection for talking-head videos
 - **Video Splitting**: FFmpeg-based clip extraction with thumbnail generation
 - **AI Tagging**: GPT-4o-mini classification for content types (hook, product_benefit, proof, testimonial, objection_handling, cta, b_roll, etc.)
+- **Duplicate Detection**: OpenAI embeddings-based similarity detection for finding duplicates, multiple takes, and related content
 - **R2 Storage**: Cloudflare R2 integration for reading source videos and storing processed clips
 - **Webhook Notifications**: Callback on job completion with full results
 
@@ -31,8 +32,10 @@ A Python-based video processing pipeline that runs on Cloudflare Containers. Thi
 │  │  4. Create Clip Definitions                          │    │
 │  │  5. Split Video (FFmpeg)                            │    │
 │  │  6. Tag Clips (GPT-4o-mini)                         │    │
-│  │  7. Upload to R2                                     │    │
-│  │  8. Call Webhook                                     │    │
+│  │  7. Generate Embeddings (OpenAI text-embedding)     │    │
+│  │  8. Detect Duplicates & Group Similar Clips         │    │
+│  │  9. Upload to R2                                     │    │
+│  │  10. Call Webhook                                    │    │
 │  └─────────────────────────────────────────────────────┘    │
 │                                                              │
 └─────────────────────────────────────────────────────────────┘
@@ -199,29 +202,72 @@ The tagger classifies clips into the following content types:
 | `outro` | Closing statements |
 | `transition` | Connecting segments |
 
+## Duplicate Detection
+
+The pipeline includes intelligent duplicate detection using OpenAI's `text-embedding-3-small` model to identify similar clips based on their transcript content.
+
+### Similarity Thresholds
+
+| Group Type | Threshold | Description |
+|------------|-----------|-------------|
+| `duplicate` | ≥ 0.95 | Nearly identical content (same words) |
+| `multiple_takes` | ≥ 0.85 + time proximity | Same content recorded multiple times (within 2 min) |
+| `same_topic` | ≥ 0.75 | Related content discussing similar topics |
+
+### How It Works
+
+1. **Embedding Generation**: Each clip's transcript is converted to a 1536-dimensional vector using OpenAI's embedding API
+2. **Pairwise Comparison**: All clip pairs are compared using cosine similarity
+3. **Group Classification**: Similar pairs are classified based on similarity score and temporal proximity
+4. **Connected Components**: Clips are grouped using union-find algorithm to create clip groups
+
+### Output
+
+The webhook payload includes clip groups:
+
+```json
+{
+  "clip_groups": [
+    {
+      "group_id": "uuid",
+      "group_type": "duplicate",
+      "clip_ids": ["clip_001", "clip_005"],
+      "representative_clip_id": "clip_001",
+      "similarity_scores": {
+        "clip_005": 0.97
+      }
+    }
+  ]
+}
+```
+
 ## Project Structure
 
 ```
 workers/cloudflare/
 ├── Dockerfile
 ├── wrangler.toml
-├── requirements.txt
+├── requirements.txt          # Full dependencies (local dev)
+├── requirements-cf.txt       # Optimized for Cloudflare (no PyTorch)
 ├── requirements-dev.txt
 ├── pytest.ini
 ├── README.md
 ├── src/
 │   ├── __init__.py
-│   ├── main.py           # FastAPI application
-│   ├── models.py         # Pydantic models
-│   ├── pipeline.py       # Pipeline orchestrator
-│   ├── transcribe.py     # Whisper transcription
-│   ├── scene_detect.py   # PySceneDetect integration
-│   ├── split_video.py    # FFmpeg video splitting
-│   ├── tagger.py         # GPT-4o-mini tagging
-│   └── r2_client.py      # R2 storage client
+│   ├── main.py               # FastAPI application
+│   ├── models.py             # Pydantic models
+│   ├── pipeline.py           # Pipeline orchestrator
+│   ├── transcribe.py         # Whisper transcription
+│   ├── scene_detect.py       # PySceneDetect integration
+│   ├── split_video.py        # FFmpeg video splitting
+│   ├── tagger.py             # GPT-4o-mini tagging
+│   ├── duplicate_detect.py   # OpenAI embeddings duplicate detection
+│   ├── error_detect.py       # Error detection in clips
+│   ├── quality_rate.py       # Quality rating for clips
+│   └── r2_client.py          # R2 storage client
 └── tests/
     ├── __init__.py
-    ├── conftest.py       # Test fixtures
+    ├── conftest.py           # Test fixtures
     ├── test_transcribe.py
     ├── test_scene_detect.py
     ├── test_split_video.py
@@ -231,6 +277,18 @@ workers/cloudflare/
         ├── __init__.py
         └── mock_openai.py
 ```
+
+## Cloudflare Deployment
+
+The Dockerfile uses `requirements-cf.txt` which excludes heavy dependencies like `sentence-transformers` (PyTorch) to keep the container image under the 4GB limit. Duplicate detection uses OpenAI's embedding API instead of local inference.
+
+### Image Size Optimization
+
+| Dependency | Size Impact | Solution |
+|------------|-------------|----------|
+| `sentence-transformers` | ~2GB (includes PyTorch) | Use OpenAI embeddings API |
+| `numpy` | ~50MB | Pure Python cosine similarity |
+| `supabase` | ~30MB | Only needed for local runner |
 
 ## Webhook Payload
 

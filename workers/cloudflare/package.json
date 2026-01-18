@@ -1,0 +1,17 @@
+{
+  "name": "video-processing-pipeline",
+  "version": "1.0.0",
+  "description": "Cloudflare Container-based video processing pipeline",
+  "main": "src/worker.ts",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "types": "wrangler types"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.6",
+    "typescript": "^5.3.3",
+    "wrangler": "^4.58.0"
+  }
+}

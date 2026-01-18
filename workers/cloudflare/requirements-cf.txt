@@ -1,0 +1,25 @@
+# Core dependencies (Cloudflare Container optimized)
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+
+# OpenAI API (use for embeddings instead of local sentence-transformers)
+openai>=1.12.0
+
+# Scene detection - using lightweight approach
+scenedetect>=0.6.2
+opencv-python-headless>=4.9.0
+
+# AWS S3/R2 client
+boto3>=1.34.0
+aioboto3>=12.3.0
+
+# HTTP client
+httpx>=0.26.0
+
+# Utilities
+python-multipart>=0.0.6
+tenacity>=8.2.3
+structlog>=24.1.0
+python-dotenv>=1.0.0
