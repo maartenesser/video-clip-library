@@ -49,3 +49,4 @@ venv/
 tmp/
 temp/
 *.tmp
+.vercel
