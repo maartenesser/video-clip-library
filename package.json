@@ -17,6 +17,7 @@
     "format": "prettier --write ."
   },
   "devDependencies": {
+    "next": "^14.2.0",
     "prettier": "^3.2.0",
     "typescript": "^5.3.0"
   },
