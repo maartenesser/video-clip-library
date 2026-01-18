@@ -1,8 +1,9 @@
 "use client";
 
 import * as React from "react";
-import { useState, useRef } from "react";
-import { Play, Pause } from "lucide-react";
+import { useState, useRef, useCallback } from "react";
+import Image from "next/image";
+import { Play, Pause, Star, Copy } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
@@ -20,6 +21,10 @@ interface ClipCardProps {
   durationSeconds: number;
   transcriptSegment?: string | null;
   tags?: Tag[];
+  qualityScore?: number;
+  groupCount?: number;
+  groupType?: 'duplicate' | 'same_topic' | 'multiple_takes';
+  isInAssembly?: boolean;
   onClick?: () => void;
   className?: string;
 }
@@ -31,6 +36,10 @@ export function ClipCard({
   durationSeconds,
   transcriptSegment,
   tags = [],
+  qualityScore,
+  groupCount = 0,
+  groupType,
+  isInAssembly = false,
   onClick,
   className,
 }: ClipCardProps) {
@@ -91,26 +100,67 @@ export function ClipCard({
     return luminance > 0.5 ? "#000000" : "#ffffff";
   };
 
+  const getQualityColor = (score: number) => {
+    if (score >= 4.5) return "bg-green-500";
+    if (score >= 4.0) return "bg-green-400";
+    if (score >= 3.5) return "bg-yellow-400";
+    if (score >= 3.0) return "bg-orange-400";
+    return "bg-red-400";
+  };
+
+  const getGroupBorderColor = (type?: string) => {
+    switch (type) {
+      case 'duplicate': return "border-l-4 border-l-red-500";
+      case 'same_topic': return "border-l-4 border-l-blue-500";
+      case 'multiple_takes': return "border-l-4 border-l-purple-500";
+      default: return "";
+    }
+  };
+
+  const getAssemblyStyle = () => {
+    return isInAssembly ? "ring-2 ring-primary ring-offset-2" : "";
+  };
+
+  // Keyboard handler for accessibility
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        onClick?.();
+      }
+    },
+    [onClick]
+  );
+
   return (
     <Card
       className={cn(
-        "overflow-hidden cursor-pointer transition-all hover:shadow-lg hover:border-primary/50",
+        "overflow-hidden cursor-pointer transition-all hover:shadow-lg hover:border-primary/50 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2",
+        getGroupBorderColor(groupType),
+        getAssemblyStyle(),
         className
       )}
       onClick={onClick}
+      onKeyDown={handleKeyDown}
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}
+      tabIndex={0}
+      role="button"
+      aria-label={transcriptSegment ? `Video clip: ${transcriptSegment.substring(0, 50)}...` : `Video clip - ${formatDuration(durationSeconds)}`}
       data-testid="clip-card"
     >
       {/* Video/Thumbnail container */}
       <div className="relative aspect-video bg-muted">
         {/* Thumbnail (shown when not hovered) */}
         {thumbnailUrl && !isHovered && (
-          <img
+          <Image
             src={thumbnailUrl}
             alt="Clip thumbnail"
-            className="w-full h-full object-cover"
+            fill
+            sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw"
+            className="object-cover"
             data-testid="clip-thumbnail"
+            unoptimized={thumbnailUrl.startsWith('http')}
           />
         )}
 
@@ -146,6 +196,33 @@ export function ClipCard({
         <div className="absolute bottom-2 right-2 px-2 py-1 bg-black/75 rounded text-xs text-white font-medium">
           {formatDuration(durationSeconds)}
         </div>
+
+        {/* Quality score badge */}
+        {qualityScore !== undefined && (
+          <div
+            className={cn(
+              "absolute top-2 right-2 px-1.5 py-0.5 rounded text-xs font-medium text-white flex items-center gap-0.5",
+              getQualityColor(qualityScore)
+            )}
+            data-testid="quality-score"
+            title={`Quality: ${qualityScore.toFixed(1)}/5`}
+          >
+            <Star className="h-3 w-3 fill-current" />
+            {qualityScore.toFixed(1)}
+          </div>
+        )}
+
+        {/* Group indicator */}
+        {groupCount > 0 && (
+          <div
+            className="absolute bottom-2 left-2 px-1.5 py-0.5 bg-purple-500 rounded text-xs font-medium text-white flex items-center gap-0.5"
+            data-testid="group-badge"
+            title={`Part of ${groupCount} group${groupCount > 1 ? 's' : ''}`}
+          >
+            <Copy className="h-3 w-3" />
+            {groupCount}
+          </div>
+        )}
       </div>
 
       <CardContent className="p-3">

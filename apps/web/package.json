@@ -15,9 +15,17 @@
     "test:api:coverage": "vitest run --coverage --dir __tests__/api",
     "test:ui": "vitest run --dir __tests__/components",
     "test:ui:watch": "vitest --dir __tests__/components",
-    "test:ui:coverage": "vitest run --coverage --dir __tests__/components"
+    "test:ui:coverage": "vitest run --coverage --dir __tests__/components",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui",
+    "test:e2e:debug": "playwright test --debug",
+    "test:e2e:report": "playwright show-report"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.966.0",
+    "@supabase/ssr": "^0.5.0",
+    "@supabase/supabase-js": "^2.45.0",
+    "openai": "^4.75.0",
     "@radix-ui/react-checkbox": "^1.3.3",
     "@radix-ui/react-dialog": "^1.1.15",
     "@radix-ui/react-dropdown-menu": "^2.1.16",
@@ -41,6 +49,7 @@
     "zod": "^3.22.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.48.0",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.1",
     "@testing-library/user-event": "^14.6.1",

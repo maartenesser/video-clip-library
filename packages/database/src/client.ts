@@ -9,6 +9,9 @@ import type {
   ClipUpdate,
   ClipFilter,
   ClipWithTags,
+  ClipWithQuality,
+  ClipComplete,
+  ClipSearchResult,
   Tag,
   TagInsert,
   TagUpdate,
@@ -19,6 +22,29 @@ import type {
   ProcessingJobInsert,
   ProcessingJobUpdate,
   ProcessingJobFilter,
+  ClipQuality,
+  ClipQualityInsert,
+  ClipQualityUpdate,
+  ClipQualityFilter,
+  ClipGroup,
+  ClipGroupInsert,
+  ClipGroupUpdate,
+  ClipGroupFilter,
+  ClipGroupMember,
+  ClipGroupMemberInsert,
+  ClipEmbedding,
+  ClipEmbeddingInsert,
+  ChatConversation,
+  ChatConversationInsert,
+  ChatConversationUpdate,
+  ChatConversationFilter,
+  ChatConversationWithMessages,
+  ChatMessage,
+  ChatMessageInsert,
+  AssembledVideo,
+  AssembledVideoInsert,
+  AssembledVideoUpdate,
+  AssembledVideoFilter,
   PaginationParams,
   PaginatedResult,
 } from './types.js';
@@ -540,6 +566,671 @@ export class DatabaseClient {
       .eq('id', id);
 
     if (error) throw error;
+  }
+
+  // ==========================================================================
+  // Clip Quality
+  // ==========================================================================
+
+  async getClipQuality(clipId: string): Promise<ClipQuality | null> {
+    const { data, error } = await this.client
+      .from('clip_quality')
+      .select('*')
+      .eq('clip_id', clipId)
+      .single();
+
+    if (error && error.code !== 'PGRST116') throw error;
+    return data as ClipQuality | null;
+  }
+
+  async getClipsWithQuality(
+    filter?: ClipQualityFilter,
+    pagination?: PaginationParams
+  ): Promise<PaginatedResult<ClipWithQuality>> {
+    const { page = 1, limit = 20, orderBy = 'overall_quality_score', orderDirection = 'desc' } = pagination || {};
+    const offset = (page - 1) * limit;
+
+    let query = this.client
+      .from('clips')
+      .select(`
+        *,
+        quality:clip_quality(*)
+      `, { count: 'exact' });
+
+    if (filter?.min_overall_score !== undefined) {
+      query = query.gte('clip_quality.overall_quality_score', filter.min_overall_score);
+    }
+    if (filter?.min_speaking_score !== undefined) {
+      query = query.gte('clip_quality.speaking_quality_score', filter.min_speaking_score);
+    }
+    if (filter?.min_audio_score !== undefined) {
+      query = query.gte('clip_quality.audio_quality_score', filter.min_audio_score);
+    }
+    if (filter?.max_filler_words !== undefined) {
+      query = query.lte('clip_quality.filler_word_count', filter.max_filler_words);
+    }
+    if (filter?.max_hesitations !== undefined) {
+      query = query.lte('clip_quality.hesitation_count', filter.max_hesitations);
+    }
+
+    query = query
+      .order(orderBy, { ascending: orderDirection === 'asc', referencedTable: 'clip_quality' })
+      .range(offset, offset + limit - 1);
+
+    const { data, error, count } = await query;
+
+    if (error) throw error;
+
+    return {
+      data: (data || []) as ClipWithQuality[],
+      count: count || 0,
+      page,
+      limit,
+      totalPages: Math.ceil((count || 0) / limit),
+    };
+  }
+
+  async createClipQuality(quality: ClipQualityInsert): Promise<ClipQuality> {
+    const { data, error } = await this.client
+      .from('clip_quality')
+      .insert(quality)
+      .select()
+      .single();
+
+    if (error) throw error;
+    return data as ClipQuality;
+  }
+
+  async updateClipQuality(clipId: string, update: ClipQualityUpdate): Promise<ClipQuality> {
+    const { data, error } = await this.client
+      .from('clip_quality')
+      .update(update)
+      .eq('clip_id', clipId)
+      .select()
+      .single();
+
+    if (error) throw error;
+    return data as ClipQuality;
+  }
+
+  async upsertClipQuality(quality: ClipQualityInsert): Promise<ClipQuality> {
+    const { data, error } = await this.client
+      .from('clip_quality')
+      .upsert(quality)
+      .select()
+      .single();
+
+    if (error) throw error;
+    return data as ClipQuality;
+  }
+
+  async deleteClipQuality(clipId: string): Promise<void> {
+    const { error } = await this.client
+      .from('clip_quality')
+      .delete()
+      .eq('clip_id', clipId);
+
+    if (error) throw error;
+  }
+
+  // ==========================================================================
+  // Clip Groups
+  // ==========================================================================
+
+  async getClipGroups(
+    filter?: ClipGroupFilter,
+    pagination?: PaginationParams
+  ): Promise<PaginatedResult<ClipGroup>> {
+    const { page = 1, limit = 20, orderBy = 'created_at', orderDirection = 'desc' } = pagination || {};
+    const offset = (page - 1) * limit;
+
+    let query = this.client
+      .from('clip_groups')
+      .select('*', { count: 'exact' });
+
+    if (filter?.source_id) {
+      query = query.eq('source_id', filter.source_id);
+    }
+    if (filter?.group_type) {
+      query = query.eq('group_type', filter.group_type);
+    }
+
+    query = query
+      .order(orderBy, { ascending: orderDirection === 'asc' })
+      .range(offset, offset + limit - 1);
+
+    const { data, error, count } = await query;
+
+    if (error) throw error;
+
+    return {
+      data: (data || []) as ClipGroup[],
+      count: count || 0,
+      page,
+      limit,
+      totalPages: Math.ceil((count || 0) / limit),
+    };
+  }
+
+  async getClipGroupById(id: string): Promise<ClipGroup | null> {
+    const { data, error } = await this.client
+      .from('clip_groups')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (error && error.code !== 'PGRST116') throw error;
+    return data as ClipGroup | null;
+  }
+
+  async getClipGroupWithMembers(id: string): Promise<(ClipGroup & { members: (ClipGroupMember & { clip: Clip })[] }) | null> {
+    const { data, error } = await this.client
+      .from('clip_groups')
+      .select(`
+        *,
+        members:clip_group_members(
+          clip_id,
+          group_id,
+          similarity_score,
+          is_representative,
+          clip:clips(*)
+        )
+      `)
+      .eq('id', id)
+      .single();
+
+    if (error && error.code !== 'PGRST116') throw error;
+    return data as (ClipGroup & { members: (ClipGroupMember & { clip: Clip })[] }) | null;
+  }
+
+  async getClipGroupsBySourceId(sourceId: string): Promise<ClipGroup[]> {
+    const { data, error } = await this.client
+      .from('clip_groups')
+      .select('*')
+      .eq('source_id', sourceId)
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+    return (data || []) as ClipGroup[];
+  }
+
+  async createClipGroup(group: ClipGroupInsert): Promise<ClipGroup> {
+    const { data, error } = await this.client
+      .from('clip_groups')
+      .insert(group)
+      .select()
+      .single();
+
+    if (error) throw error;
+    return data as ClipGroup;
+  }
+
+  async updateClipGroup(id: string, update: ClipGroupUpdate): Promise<ClipGroup> {
+    const { data, error } = await this.client
+      .from('clip_groups')
+      .update(update)
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) throw error;
+    return data as ClipGroup;
+  }
+
+  async deleteClipGroup(id: string): Promise<void> {
+    const { error } = await this.client
+      .from('clip_groups')
+      .delete()
+      .eq('id', id);
+
+    if (error) throw error;
+  }
+
+  // ==========================================================================
+  // Clip Group Members
+  // ==========================================================================
+
+  async addClipToGroup(member: ClipGroupMemberInsert): Promise<ClipGroupMember> {
+    const { data, error } = await this.client
+      .from('clip_group_members')
+      .insert(member)
+      .select()
+      .single();
+
+    if (error) throw error;
+    return data as ClipGroupMember;
+  }
+
+  async addClipsToGroup(groupId: string, clipIds: string[], similarityScores?: number[]): Promise<ClipGroupMember[]> {
+    const members: ClipGroupMemberInsert[] = clipIds.map((clipId, index) => ({
+      clip_id: clipId,
+      group_id: groupId,
+      similarity_score: similarityScores?.[index] ?? null,
+      is_representative: index === 0,
+    }));
+
+    const { data, error } = await this.client
+      .from('clip_group_members')
+      .insert(members)
+      .select();
+
+    if (error) throw error;
+    return (data || []) as ClipGroupMember[];
+  }
+
+  async removeClipFromGroup(clipId: string, groupId: string): Promise<void> {
+    const { error } = await this.client
+      .from('clip_group_members')
+      .delete()
+      .eq('clip_id', clipId)
+      .eq('group_id', groupId);
+
+    if (error) throw error;
+  }
+
+  async setRepresentativeClip(clipId: string, groupId: string): Promise<void> {
+    // First, unset all representatives in the group
+    await this.client
+      .from('clip_group_members')
+      .update({ is_representative: false })
+      .eq('group_id', groupId);
+
+    // Then set the new representative
+    const { error } = await this.client
+      .from('clip_group_members')
+      .update({ is_representative: true })
+      .eq('clip_id', clipId)
+      .eq('group_id', groupId);
+
+    if (error) throw error;
+
+    // Also update the group's representative_clip_id
+    await this.client
+      .from('clip_groups')
+      .update({ representative_clip_id: clipId })
+      .eq('id', groupId);
+  }
+
+  async getClipGroups_byClipId(clipId: string): Promise<ClipGroup[]> {
+    const { data, error } = await this.client
+      .from('clip_group_members')
+      .select('group:clip_groups(*)')
+      .eq('clip_id', clipId);
+
+    if (error) throw error;
+    return (data || []).map((item) => (item as unknown as { group: ClipGroup }).group);
+  }
+
+  // ==========================================================================
+  // Clip Embeddings
+  // ==========================================================================
+
+  async getClipEmbedding(clipId: string): Promise<ClipEmbedding | null> {
+    const { data, error } = await this.client
+      .from('clip_embeddings')
+      .select('*')
+      .eq('clip_id', clipId)
+      .single();
+
+    if (error && error.code !== 'PGRST116') throw error;
+    return data as ClipEmbedding | null;
+  }
+
+  async createClipEmbedding(embedding: ClipEmbeddingInsert): Promise<ClipEmbedding> {
+    const { data, error } = await this.client
+      .from('clip_embeddings')
+      .insert(embedding)
+      .select()
+      .single();
+
+    if (error) throw error;
+    return data as ClipEmbedding;
+  }
+
+  async upsertClipEmbedding(embedding: ClipEmbeddingInsert): Promise<ClipEmbedding> {
+    const { data, error } = await this.client
+      .from('clip_embeddings')
+      .upsert(embedding)
+      .select()
+      .single();
+
+    if (error) throw error;
+    return data as ClipEmbedding;
+  }
+
+  async deleteClipEmbedding(clipId: string): Promise<void> {
+    const { error } = await this.client
+      .from('clip_embeddings')
+      .delete()
+      .eq('clip_id', clipId);
+
+    if (error) throw error;
+  }
+
+  async searchClipsBySimilarity(
+    queryEmbedding: number[],
+    threshold: number = 0.7,
+    limit: number = 10
+  ): Promise<ClipSearchResult[]> {
+    const { data, error } = await this.client.rpc('search_clips_by_embedding', {
+      query_embedding: queryEmbedding,
+      match_threshold: threshold,
+      match_count: limit,
+    });
+
+    if (error) throw error;
+
+    // Fetch full clip data for the results
+    const clipIds = (data || []).map((r: { clip_id: string }) => r.clip_id);
+    if (clipIds.length === 0) return [];
+
+    const { data: clips, error: clipError } = await this.client
+      .from('clips')
+      .select('*')
+      .in('id', clipIds);
+
+    if (clipError) throw clipError;
+
+    // Merge similarity scores with clips
+    const similarityMap = new Map((data || []).map((r: { clip_id: string; similarity: number }) => [r.clip_id, r.similarity]));
+    return (clips || []).map((clip) => ({
+      ...clip,
+      similarity: similarityMap.get(clip.id) || 0,
+    })) as ClipSearchResult[];
+  }
+
+  // ==========================================================================
+  // Chat Conversations
+  // ==========================================================================
+
+  async getChatConversations(
+    filter?: ChatConversationFilter,
+    pagination?: PaginationParams
+  ): Promise<PaginatedResult<ChatConversation>> {
+    const { page = 1, limit = 20, orderBy = 'updated_at', orderDirection = 'desc' } = pagination || {};
+    const offset = (page - 1) * limit;
+
+    let query = this.client
+      .from('chat_conversations')
+      .select('*', { count: 'exact' });
+
+    if (filter?.user_id) {
+      query = query.eq('user_id', filter.user_id);
+    }
+    if (filter?.search) {
+      query = query.ilike('title', `%${filter.search}%`);
+    }
+
+    query = query
+      .order(orderBy, { ascending: orderDirection === 'asc' })
+      .range(offset, offset + limit - 1);
+
+    const { data, error, count } = await query;
+
+    if (error) throw error;
+
+    return {
+      data: (data || []) as ChatConversation[],
+      count: count || 0,
+      page,
+      limit,
+      totalPages: Math.ceil((count || 0) / limit),
+    };
+  }
+
+  async getChatConversationById(id: string): Promise<ChatConversation | null> {
+    const { data, error } = await this.client
+      .from('chat_conversations')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (error && error.code !== 'PGRST116') throw error;
+    return data as ChatConversation | null;
+  }
+
+  async getChatConversationWithMessages(id: string): Promise<ChatConversationWithMessages | null> {
+    const { data, error } = await this.client
+      .from('chat_conversations')
+      .select(`
+        *,
+        messages:chat_messages(*)
+      `)
+      .eq('id', id)
+      .single();
+
+    if (error && error.code !== 'PGRST116') throw error;
+    return data as ChatConversationWithMessages | null;
+  }
+
+  async createChatConversation(conversation: ChatConversationInsert): Promise<ChatConversation> {
+    const { data, error } = await this.client
+      .from('chat_conversations')
+      .insert(conversation)
+      .select()
+      .single();
+
+    if (error) throw error;
+    return data as ChatConversation;
+  }
+
+  async updateChatConversation(id: string, update: ChatConversationUpdate): Promise<ChatConversation> {
+    const { data, error } = await this.client
+      .from('chat_conversations')
+      .update(update)
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) throw error;
+    return data as ChatConversation;
+  }
+
+  async deleteChatConversation(id: string): Promise<void> {
+    const { error } = await this.client
+      .from('chat_conversations')
+      .delete()
+      .eq('id', id);
+
+    if (error) throw error;
+  }
+
+  // ==========================================================================
+  // Chat Messages
+  // ==========================================================================
+
+  async getChatMessages(conversationId: string): Promise<ChatMessage[]> {
+    const { data, error } = await this.client
+      .from('chat_messages')
+      .select('*')
+      .eq('conversation_id', conversationId)
+      .order('created_at', { ascending: true });
+
+    if (error) throw error;
+    return (data || []) as ChatMessage[];
+  }
+
+  async createChatMessage(message: ChatMessageInsert): Promise<ChatMessage> {
+    const { data, error } = await this.client
+      .from('chat_messages')
+      .insert(message)
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    // Update conversation's updated_at
+    await this.client
+      .from('chat_conversations')
+      .update({ updated_at: new Date().toISOString() })
+      .eq('id', message.conversation_id);
+
+    return data as ChatMessage;
+  }
+
+  async deleteChatMessage(id: string): Promise<void> {
+    const { error } = await this.client
+      .from('chat_messages')
+      .delete()
+      .eq('id', id);
+
+    if (error) throw error;
+  }
+
+  // ==========================================================================
+  // Assembled Videos
+  // ==========================================================================
+
+  async getAssembledVideos(
+    filter?: AssembledVideoFilter,
+    pagination?: PaginationParams
+  ): Promise<PaginatedResult<AssembledVideo>> {
+    const { page = 1, limit = 20, orderBy = 'created_at', orderDirection = 'desc' } = pagination || {};
+    const offset = (page - 1) * limit;
+
+    let query = this.client
+      .from('assembled_videos')
+      .select('*', { count: 'exact' });
+
+    if (filter?.user_id) {
+      query = query.eq('user_id', filter.user_id);
+    }
+    if (filter?.status) {
+      query = query.eq('status', filter.status);
+    }
+
+    query = query
+      .order(orderBy, { ascending: orderDirection === 'asc' })
+      .range(offset, offset + limit - 1);
+
+    const { data, error, count } = await query;
+
+    if (error) throw error;
+
+    return {
+      data: (data || []) as AssembledVideo[],
+      count: count || 0,
+      page,
+      limit,
+      totalPages: Math.ceil((count || 0) / limit),
+    };
+  }
+
+  async getAssembledVideoById(id: string): Promise<AssembledVideo | null> {
+    const { data, error } = await this.client
+      .from('assembled_videos')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (error && error.code !== 'PGRST116') throw error;
+    return data as AssembledVideo | null;
+  }
+
+  async createAssembledVideo(video: AssembledVideoInsert): Promise<AssembledVideo> {
+    const { data, error } = await this.client
+      .from('assembled_videos')
+      .insert(video)
+      .select()
+      .single();
+
+    if (error) throw error;
+    return data as AssembledVideo;
+  }
+
+  async updateAssembledVideo(id: string, update: AssembledVideoUpdate): Promise<AssembledVideo> {
+    const { data, error } = await this.client
+      .from('assembled_videos')
+      .update(update)
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) throw error;
+    return data as AssembledVideo;
+  }
+
+  async completeAssembledVideo(id: string, fileUrl: string, fileKey: string, durationSeconds: number): Promise<AssembledVideo> {
+    return this.updateAssembledVideo(id, {
+      file_url: fileUrl,
+      file_key: fileKey,
+      duration_seconds: durationSeconds,
+      status: 'completed',
+    });
+  }
+
+  async failAssembledVideo(id: string, errorMessage: string): Promise<AssembledVideo> {
+    return this.updateAssembledVideo(id, {
+      status: 'failed',
+      error_message: errorMessage,
+    });
+  }
+
+  async deleteAssembledVideo(id: string): Promise<void> {
+    const { error } = await this.client
+      .from('assembled_videos')
+      .delete()
+      .eq('id', id);
+
+    if (error) throw error;
+  }
+
+  // ==========================================================================
+  // Extended Clip Queries
+  // ==========================================================================
+
+  async getClipComplete(id: string): Promise<ClipComplete | null> {
+    const { data, error } = await this.client
+      .from('clips')
+      .select(`
+        *,
+        source:sources(*),
+        tags:clip_tags(
+          clip_id,
+          tag_id,
+          confidence_score,
+          assigned_by,
+          tag:tags(*)
+        ),
+        quality:clip_quality(*),
+        groups:clip_group_members(
+          clip_id,
+          group_id,
+          similarity_score,
+          is_representative,
+          group:clip_groups(*)
+        )
+      `)
+      .eq('id', id)
+      .single();
+
+    if (error && error.code !== 'PGRST116') throw error;
+    return data as ClipComplete | null;
+  }
+
+  async getHighQualityClips(minQuality: number = 3.5, sourceId?: string): Promise<ClipWithQuality[]> {
+    const { data, error } = await this.client.rpc('get_high_quality_clips', {
+      min_quality: minQuality,
+      source_filter: sourceId || null,
+    });
+
+    if (error) throw error;
+
+    // Fetch full clip data for the results
+    const clipIds = (data || []).map((r: { clip_id: string }) => r.clip_id);
+    if (clipIds.length === 0) return [];
+
+    const { data: clips, error: clipError } = await this.client
+      .from('clips')
+      .select(`
+        *,
+        quality:clip_quality(*)
+      `)
+      .in('id', clipIds);
+
+    if (clipError) throw clipError;
+
+    return (clips || []) as ClipWithQuality[];
   }
 }
 

@@ -12,19 +12,35 @@ import httpx
 import structlog
 
 from .models import (
+    AudioQualityMetricsModel,
+    ClipEmbeddingModel,
+    ClipGroupModel,
     ClipTag,
+    ErrorAnalysisModel,
+    FillerWordModel,
+    GroupType,
+    HesitationModel,
     PipelineResult,
+    PipelineResultWithQuality,
     ProcessedClip,
+    ProcessedClipWithQuality,
     ProcessingStatus,
+    QualityRatingModel,
+    SilenceRegionModel,
+    SpeakingQualityMetricsModel,
     TagScore,
     TranscriptResult,
     WebhookPayload,
+    WebhookPayloadWithQuality,
 )
 from .r2_client import R2Client, get_r2_client
 from .scene_detect import SceneDetector
 from .split_video import VideoSplitter, create_clip_definitions
 from .tagger import ClipTagger, create_clip_contexts
 from .transcribe import Transcriber
+from .error_detect import ErrorDetector
+from .quality_rate import QualityRater
+from .duplicate_detect import DuplicateDetector
 
 logger = structlog.get_logger(__name__)
 
@@ -45,7 +61,11 @@ class VideoPipeline:
         scene_detector: Optional[SceneDetector] = None,
         video_splitter: Optional[VideoSplitter] = None,
         clip_tagger: Optional[ClipTagger] = None,
-        output_bucket: str = "processed-clips",
+        error_detector: Optional[ErrorDetector] = None,
+        quality_rater: Optional[QualityRater] = None,
+        duplicate_detector: Optional[DuplicateDetector] = None,
+        output_bucket: str = "video-clips",
+        enable_quality_analysis: bool = True,
     ):
         """Initialize the pipeline.
 
@@ -55,14 +75,22 @@ class VideoPipeline:
             scene_detector: Scene detector for visual analysis
             video_splitter: Video splitter for clip extraction
             clip_tagger: Tagger for content classification
+            error_detector: Detector for speech errors
+            quality_rater: Rater for clip quality
+            duplicate_detector: Detector for duplicate/similar clips
             output_bucket: Bucket for output clips
+            enable_quality_analysis: Whether to run quality analysis steps
         """
         self.r2_client = r2_client or get_r2_client()
         self.transcriber = transcriber
         self.scene_detector = scene_detector or SceneDetector()
         self.video_splitter = video_splitter or VideoSplitter()
         self.clip_tagger = clip_tagger
+        self.error_detector = error_detector
+        self.quality_rater = quality_rater
+        self.duplicate_detector = duplicate_detector
         self.output_bucket = output_bucket
+        self.enable_quality_analysis = enable_quality_analysis
 
         # Lazy initialization for API-dependent components
         self._transcriber_initialized = False
@@ -79,6 +107,24 @@ class VideoPipeline:
         if self.clip_tagger is None:
             self.clip_tagger = ClipTagger()
         return self.clip_tagger
+
+    def _ensure_error_detector(self) -> ErrorDetector:
+        """Ensure error detector is initialized."""
+        if self.error_detector is None:
+            self.error_detector = ErrorDetector()
+        return self.error_detector
+
+    def _ensure_quality_rater(self) -> QualityRater:
+        """Ensure quality rater is initialized."""
+        if self.quality_rater is None:
+            self.quality_rater = QualityRater()
+        return self.quality_rater
+
+    def _ensure_duplicate_detector(self) -> DuplicateDetector:
+        """Ensure duplicate detector is initialized."""
+        if self.duplicate_detector is None:
+            self.duplicate_detector = DuplicateDetector()
+        return self.duplicate_detector
 
     async def download_video(self, video_url: str, temp_dir: str) -> str:
         """Download video from R2 to local storage.
@@ -224,7 +270,7 @@ class VideoPipeline:
         min_clip_duration: float = 3.0,
         max_clip_duration: float = 20.0,
         min_scene_length: float = 1.5,
-    ) -> PipelineResult:
+    ) -> PipelineResultWithQuality:
         """Execute the full video processing pipeline.
 
         Steps:
@@ -235,7 +281,11 @@ class VideoPipeline:
         5. Split into clips (3-20 seconds)
         6. Tag each clip with AI
         7. Upload clips + thumbnails to R2
-        8. Call webhook with results
+        8. Analyze speech errors (pauses, fillers, hesitations)
+        9. Rate clip quality (speaking + audio)
+        10. Generate transcript embeddings
+        11. Group similar/duplicate clips
+        12. Build final result and call webhook
 
         Args:
             source_id: Unique identifier for the source video
@@ -246,7 +296,7 @@ class VideoPipeline:
             min_scene_length: Minimum scene length for detection
 
         Returns:
-            PipelineResult with all processed clips
+            PipelineResultWithQuality with all processed clips and quality data
         """
         job_id = str(uuid.uuid4())
         start_time = time.time()
@@ -316,14 +366,142 @@ class VideoPipeline:
                 logger.info("Step 7: Uploading clips to R2", job_id=job_id)
                 upload_urls = await self.upload_clips(clip_results, source_id)
 
-                # Step 8: Build final result
+                # Initialize quality analysis data
+                error_analyses = []
+                quality_ratings = []
+                embeddings = []
+                clip_groups = []
+
+                # Steps 8-11: Quality analysis (optional)
+                if self.enable_quality_analysis:
+                    # Step 8: Analyze speech errors
+                    logger.info("Step 8: Analyzing speech errors", job_id=job_id)
+                    error_detector = self._ensure_error_detector()
+                    error_analyses = await error_detector.analyze_clips(
+                        clip_results, transcript
+                    )
+
+                    # Step 9: Rate clip quality
+                    logger.info("Step 9: Rating clip quality", job_id=job_id)
+                    quality_rater = self._ensure_quality_rater()
+                    quality_ratings = await quality_rater.rate_clips(
+                        clip_results, transcript, error_analyses
+                    )
+
+                    # Step 10: Generate transcript embeddings
+                    logger.info("Step 10: Generating embeddings", job_id=job_id)
+                    duplicate_detector = self._ensure_duplicate_detector()
+                    embeddings_raw = await duplicate_detector.generate_embeddings(
+                        clip_results
+                    )
+
+                    # Step 11: Group similar/duplicate clips
+                    logger.info("Step 11: Grouping similar clips", job_id=job_id)
+                    groups_raw = await duplicate_detector.find_groups(
+                        clip_results, embeddings_raw
+                    )
+
+                    # Convert dataclasses to Pydantic models
+                    embeddings = [
+                        ClipEmbeddingModel(
+                            clip_id=e.clip_id,
+                            embedding=e.embedding,
+                            model_name=e.model_name,
+                        )
+                        for e in embeddings_raw
+                    ]
+
+                    clip_groups = [
+                        ClipGroupModel(
+                            group_id=g.group_id,
+                            group_type=GroupType(g.group_type.value),
+                            clip_ids=g.clip_ids,
+                            representative_clip_id=g.representative_clip_id,
+                            similarity_scores=g.similarity_scores,
+                        )
+                        for g in groups_raw
+                    ]
+
+                # Create lookup maps for quality data
+                error_map = {e.clip_id: e for e in error_analyses}
+                quality_map = {q.clip_id: q for q in quality_ratings}
+                embedding_map = {e.clip_id: e.embedding for e in embeddings}
+
+                # Step 12: Build final result
+                logger.info("Step 12: Building final result", job_id=job_id)
                 processed_clips = []
                 for i, clip in enumerate(clip_results):
                     tag_result = tag_map.get(clip.clip_id)
                     video_url, thumbnail_url = upload_urls[i] if i < len(upload_urls) else ("", "")
+                    error_analysis = error_map.get(clip.clip_id)
+                    quality_rating = quality_map.get(clip.clip_id)
+
+                    # Convert error analysis to Pydantic model
+                    error_model = None
+                    if error_analysis:
+                        error_model = ErrorAnalysisModel(
+                            clip_id=error_analysis.clip_id,
+                            silence_regions=[
+                                SilenceRegionModel(
+                                    start=s.start, end=s.end, duration=s.duration
+                                )
+                                for s in error_analysis.silence_regions
+                            ],
+                            filler_words=[
+                                FillerWordModel(
+                                    word=f.word,
+                                    start=f.start,
+                                    end=f.end,
+                                    is_phrase=f.is_phrase,
+                                )
+                                for f in error_analysis.filler_words
+                            ],
+                            hesitations=[
+                                HesitationModel(
+                                    start=h.start,
+                                    end=h.end,
+                                    duration=h.duration,
+                                    type=h.type,
+                                )
+                                for h in error_analysis.hesitations
+                            ],
+                            suggested_trim_start=error_analysis.suggested_trim_start,
+                            suggested_trim_end=error_analysis.suggested_trim_end,
+                            total_filler_words=error_analysis.total_filler_words,
+                            total_hesitations=error_analysis.total_hesitations,
+                            total_silence_time=error_analysis.total_silence_time,
+                        )
+
+                    # Convert quality rating to Pydantic model
+                    quality_model = None
+                    if quality_rating:
+                        quality_model = QualityRatingModel(
+                            clip_id=quality_rating.clip_id,
+                            speaking_quality_score=quality_rating.speaking_quality_score,
+                            audio_quality_score=quality_rating.audio_quality_score,
+                            overall_quality_score=quality_rating.overall_quality_score,
+                            words_per_minute=quality_rating.words_per_minute,
+                            filler_word_count=quality_rating.filler_word_count,
+                            hesitation_count=quality_rating.hesitation_count,
+                            trimmed_start_seconds=quality_rating.trimmed_start_seconds,
+                            trimmed_end_seconds=quality_rating.trimmed_end_seconds,
+                            speaking_metrics=SpeakingQualityMetricsModel(
+                                words_per_minute=quality_rating.speaking_metrics.words_per_minute,
+                                filler_word_rate=quality_rating.speaking_metrics.filler_word_rate,
+                                hesitation_rate=quality_rating.speaking_metrics.hesitation_rate,
+                                sentence_completion_rate=quality_rating.speaking_metrics.sentence_completion_rate,
+                            ),
+                            audio_metrics=AudioQualityMetricsModel(
+                                loudness_lufs=quality_rating.audio_metrics.loudness_lufs,
+                                loudness_range=quality_rating.audio_metrics.loudness_range,
+                                true_peak_db=quality_rating.audio_metrics.true_peak_db,
+                                noise_floor_db=quality_rating.audio_metrics.noise_floor_db,
+                                clipping_detected=quality_rating.audio_metrics.clipping_detected,
+                            ),
+                        )
 
                     processed_clips.append(
-                        ProcessedClip(
+                        ProcessedClipWithQuality(
                             clip_id=clip.clip_id,
                             source_id=source_id,
                             start_time=clip.start_time,
@@ -335,12 +513,15 @@ class VideoPipeline:
                             primary_tag=tag_result.primary_tag if tag_result else ClipTag.B_ROLL,
                             tags=tag_result.all_tags if tag_result else [],
                             created_at=datetime.utcnow(),
+                            quality_rating=quality_model,
+                            error_analysis=error_model,
+                            embedding=embedding_map.get(clip.clip_id),
                         )
                     )
 
                 processing_time = time.time() - start_time
 
-                result = PipelineResult(
+                result = PipelineResultWithQuality(
                     job_id=job_id,
                     source_id=source_id,
                     status=ProcessingStatus.COMPLETED,
@@ -349,17 +530,20 @@ class VideoPipeline:
                     clips=processed_clips,
                     transcript=transcript,
                     processing_time_seconds=processing_time,
+                    clip_groups=clip_groups,
+                    embeddings=embeddings,
                 )
 
                 logger.info(
                     "Pipeline completed successfully",
                     job_id=job_id,
                     total_clips=len(processed_clips),
+                    total_groups=len(clip_groups),
                     processing_time=processing_time,
                 )
 
-                # Call webhook
-                webhook_payload = WebhookPayload(
+                # Call webhook with quality data
+                webhook_payload = WebhookPayloadWithQuality(
                     job_id=job_id,
                     source_id=source_id,
                     status=ProcessingStatus.COMPLETED,

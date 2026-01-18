@@ -33,13 +33,18 @@ export class R2Client {
     this.bucketName = config.bucketName;
     this.publicUrl = config.publicUrl;
 
+    // Use custom endpoint if provided, otherwise default to Cloudflare R2
+    const endpoint = config.endpoint || `https://${config.accountId}.r2.cloudflarestorage.com`;
+
     const s3Config: S3ClientConfig = {
       region: 'auto',
-      endpoint: `https://${config.accountId}.r2.cloudflarestorage.com`,
+      endpoint,
       credentials: {
         accessKeyId: config.accessKeyId,
         secretAccessKey: config.secretAccessKey,
       },
+      // R2 and S3-compatible services require path-style URLs
+      forcePathStyle: true,
     };
 
     this.client = new S3Client(s3Config);
@@ -99,7 +104,21 @@ export class R2Client {
       Key: key,
     });
 
-    return getSignedUrl(this.client, command, { expiresIn });
+    // R2 doesn't support some AWS S3 features, so we need to use minimal signing
+    const url = await getSignedUrl(this.client, command, {
+      expiresIn,
+      // Don't add unsigned payload header which R2 doesn't support
+      signableHeaders: new Set(['host']),
+      // Don't add checksum headers
+      unhoistableHeaders: new Set(['x-amz-checksum-mode']),
+    });
+
+    // Remove AWS-specific query params that R2 doesn't understand
+    const cleanUrl = url
+      .replace(/&x-amz-checksum-mode=[^&]*/gi, '')
+      .replace(/&x-id=[^&]*/gi, '');
+
+    return cleanUrl;
   }
 
   /**

@@ -4,29 +4,79 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { SourceCard, type SourceStatus } from "@/components/source-card";
 
-// In production, this would fetch from the API
-async function getStats() {
-  // Placeholder stats - in production, fetch from /api/stats
-  return {
-    totalSources: 0,
-    totalClips: 0,
-    processingCount: 0,
-    completedCount: 0,
-  };
+interface RecentSource {
+  id: string;
+  title: string;
+  thumbnailUrl: string | null;
+  status: SourceStatus;
+  durationSeconds: number | null;
+  creatorName: string | null;
+  createdAt: string;
+  clipCount: number;
 }
 
-async function getRecentSources() {
-  // Placeholder - in production, fetch from /api/sources?limit=6&orderBy=created_at&orderDirection=desc
-  return [] as Array<{
-    id: string;
-    title: string;
-    thumbnailUrl: string | null;
-    status: SourceStatus;
-    durationSeconds: number | null;
-    creatorName: string | null;
-    createdAt: string;
-    clipCount: number;
-  }>;
+// Fetch stats from the database
+async function getStats() {
+  try {
+    const baseUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
+
+    // Fetch sources and clips to calculate stats
+    const [sourcesRes, clipsRes] = await Promise.all([
+      fetch(`${baseUrl}/api/sources?limit=1000`, { cache: 'no-store' }),
+      fetch(`${baseUrl}/api/clips?limit=1`, { cache: 'no-store' }),
+    ]);
+
+    const sourcesData = sourcesRes.ok ? await sourcesRes.json() : { data: [], count: 0 };
+    const clipsData = clipsRes.ok ? await clipsRes.json() : { count: 0 };
+
+    const sources = sourcesData.data || [];
+    const processingCount = sources.filter((s: any) => s.status === 'processing').length;
+    const completedCount = sources.filter((s: any) => s.status === 'completed').length;
+
+    return {
+      totalSources: sourcesData.count || 0,
+      totalClips: clipsData.count || 0,
+      processingCount,
+      completedCount,
+    };
+  } catch (error) {
+    console.error('Error fetching stats:', error);
+    return {
+      totalSources: 0,
+      totalClips: 0,
+      processingCount: 0,
+      completedCount: 0,
+    };
+  }
+}
+
+async function getRecentSources(): Promise<RecentSource[]> {
+  try {
+    const baseUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
+    const response = await fetch(
+      `${baseUrl}/api/sources?limit=6&orderBy=created_at&orderDirection=desc`,
+      { cache: 'no-store' }
+    );
+
+    if (!response.ok) {
+      return [];
+    }
+
+    const data = await response.json();
+    return (data.data || []).map((source: Record<string, unknown>): RecentSource => ({
+      id: source.id as string,
+      title: source.title as string,
+      thumbnailUrl: source.original_file_url ? `/api/media/${source.original_file_key}` : null,
+      status: source.status as SourceStatus,
+      durationSeconds: source.duration_seconds as number | null,
+      creatorName: source.creator_name as string | null,
+      createdAt: source.created_at as string,
+      clipCount: (source.clip_count as number) || 0,
+    }));
+  } catch (error) {
+    console.error('Error fetching recent sources:', error);
+    return [];
+  }
 }
 
 export default async function DashboardPage() {

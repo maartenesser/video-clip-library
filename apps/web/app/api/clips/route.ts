@@ -4,6 +4,72 @@ import { handleError, getQueryParams, searchParamsToObject } from '@/lib/api-uti
 import { getDatabase } from '@/lib/database';
 import type { ClipFilter, PaginationParams } from '@video-clip-library/database';
 
+// Helper to convert clips to use proxy URLs
+function addProxyUrls(clips: any[]) {
+  const baseUrl = process.env.NEXT_PUBLIC_APP_URL || '';
+  return clips.map((clip) => {
+    let proxyFileUrl = clip.file_url;
+    let proxyThumbnailUrl = clip.thumbnail_url;
+
+    if (clip.file_key) {
+      proxyFileUrl = `${baseUrl}/api/media/${clip.file_key}`;
+      const thumbnailKey = clip.file_key.replace('.mp4', '_thumb.jpg');
+      proxyThumbnailUrl = `${baseUrl}/api/media/${thumbnailKey}`;
+    }
+
+    return {
+      ...clip,
+      file_url: proxyFileUrl,
+      thumbnail_url: proxyThumbnailUrl,
+    };
+  });
+}
+
+// Helper to fetch quality data for clips
+async function fetchQualityData(db: any, clipIds: string[]): Promise<Map<string, any>> {
+  const qualityMap = new Map();
+
+  for (const clipId of clipIds) {
+    try {
+      const quality = await db.getClipQuality(clipId);
+      if (quality) {
+        qualityMap.set(clipId, quality);
+      }
+    } catch (e) {
+      // Skip clips without quality data
+    }
+  }
+
+  return qualityMap;
+}
+
+// Helper to fetch group data for clips
+async function fetchGroupData(db: any, clipIds: string[]): Promise<Map<string, any[]>> {
+  const groupMap = new Map();
+
+  for (const clipId of clipIds) {
+    try {
+      const groups = await db.getClipGroups_byClipId(clipId);
+      if (groups && groups.length > 0) {
+        groupMap.set(clipId, groups);
+      }
+    } catch (e) {
+      // Skip clips without group data
+    }
+  }
+
+  return groupMap;
+}
+
+// Helper to add quality and group data to clips
+function enrichClips(clips: any[], qualityMap: Map<string, any>, groupMap: Map<string, any[]>): any[] {
+  return clips.map(clip => ({
+    ...clip,
+    quality: qualityMap.get(clip.id) || null,
+    groups: groupMap.get(clip.id) || [],
+  }));
+}
+
 /**
  * GET /api/clips
  *
@@ -68,8 +134,8 @@ export async function GET(request: NextRequest) {
 
       // Sort
       filteredClips.sort((a, b) => {
-        const aVal = a[pagination.orderBy as keyof typeof a];
-        const bVal = b[pagination.orderBy as keyof typeof b];
+        const aVal = a[pagination.orderBy as keyof typeof a] ?? '';
+        const bVal = b[pagination.orderBy as keyof typeof b] ?? '';
         if (pagination.orderDirection === 'asc') {
           return aVal < bVal ? -1 : aVal > bVal ? 1 : 0;
         }
@@ -78,7 +144,29 @@ export async function GET(request: NextRequest) {
 
       // Paginate
       const offset = (pagination.page! - 1) * pagination.limit!;
-      const paginatedClips = filteredClips.slice(offset, offset + pagination.limit!);
+      let paginatedClips = filteredClips.slice(offset, offset + pagination.limit!);
+
+      // Add proxy URLs
+      paginatedClips = addProxyUrls(paginatedClips);
+
+      // Fetch and add quality data if requested
+      if (validated.include_quality) {
+        const clipIds = paginatedClips.map((c: any) => c.id);
+        const qualityMap = await fetchQualityData(db, clipIds);
+        const groupMap = validated.include_groups
+          ? await fetchGroupData(db, clipIds)
+          : new Map();
+
+        paginatedClips = enrichClips(paginatedClips, qualityMap, groupMap);
+
+        // Filter by min_quality if specified
+        if (validated.min_quality !== undefined) {
+          const minQuality = validated.min_quality;
+          paginatedClips = paginatedClips.filter((c: any) =>
+            c.quality?.overall_quality_score >= minQuality
+          );
+        }
+      }
 
       return NextResponse.json({
         data: paginatedClips,
@@ -100,6 +188,30 @@ export async function GET(request: NextRequest) {
       );
       result.count = result.data.length;
       result.totalPages = Math.ceil(result.count / pagination.limit!);
+    }
+
+    // Add proxy URLs to clips
+    result.data = addProxyUrls(result.data);
+
+    // Fetch and add quality data if requested
+    if (validated.include_quality) {
+      const clipIds = result.data.map((c: any) => c.id);
+      const qualityMap = await fetchQualityData(db, clipIds);
+      const groupMap = validated.include_groups
+        ? await fetchGroupData(db, clipIds)
+        : new Map();
+
+      result.data = enrichClips(result.data, qualityMap, groupMap);
+
+      // Filter by min_quality if specified
+      if (validated.min_quality !== undefined) {
+        const minQuality = validated.min_quality;
+        result.data = result.data.filter((c: any) =>
+          c.quality?.overall_quality_score >= minQuality
+        );
+        result.count = result.data.length;
+        result.totalPages = Math.ceil(result.count / pagination.limit!);
+      }
     }
 
     return NextResponse.json(result);

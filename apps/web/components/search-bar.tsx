@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Search, X, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
@@ -30,9 +30,21 @@ export function SearchBar({
   const isControlled = controlledValue !== undefined;
   const value = isControlled ? controlledValue : internalValue;
 
-  // Debounce effect
+  // Track if user has interacted with the search
+  const hasUserTyped = useRef(false);
+  const previousValue = useRef(value);
+
+  // Debounce effect - only trigger if user has typed and value actually changed
   useEffect(() => {
     if (!onSearch) return;
+
+    // Skip if value hasn't changed or user hasn't typed yet
+    if (!hasUserTyped.current || value === previousValue.current) {
+      previousValue.current = value;
+      return;
+    }
+
+    previousValue.current = value;
 
     const handler = setTimeout(() => {
       onSearch(value);
@@ -44,6 +56,7 @@ export function SearchBar({
   const handleChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const newValue = e.target.value;
+      hasUserTyped.current = true;
       if (!isControlled) {
         setInternalValue(newValue);
       }
@@ -90,8 +103,8 @@ export function SearchBar({
       {value && (
         <Button
           variant="ghost"
-          size="sm"
-          className="absolute right-1 top-1/2 -translate-y-1/2 h-7 w-7 p-0"
+          size="icon"
+          className="absolute right-1 top-1/2 -translate-y-1/2 h-9 w-9 min-h-[44px] min-w-[44px] -mr-1"
           onClick={handleClear}
           aria-label="Clear search"
           data-testid="clear-search"

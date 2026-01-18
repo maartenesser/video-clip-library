@@ -1,0 +1,56 @@
+{
+  "name": "claude-code-templates",
+  "version": "1.0.0",
+  "description": "Plug-and-play Claude Code configuration templates for design and code review agents with Playwright MCP integration",
+  "keywords": [
+    "claude-code",
+    "ai-agents",
+    "code-review",
+    "design-review",
+    "playwright",
+    "mcp",
+    "automation",
+    "testing"
+  ],
+  "author": "Maarten Esser",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/maartenesser/claude-code-templates.git"
+  },
+  "scripts": {
+    "setup": "npm install && npx playwright install",
+    "setup:mcp": "claude mcp add playwright",
+    "test:playwright": "npx playwright test",
+    "review:design": "echo 'Run: @design-review [component]' in Claude Code",
+    "review:code": "echo 'Run: @code-review [module]' in Claude Code",
+    "review:all": "echo 'Run: @integration-review [feature]' in Claude Code"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.40.0",
+    "@playwright/mcp": "latest",
+    "prettier": "^3.1.0",
+    "eslint": "^8.54.0"
+  },
+  "optionalDependencies": {
+    "@executeautomation/playwright-mcp-server": "latest"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "claude": {
+    "agents": [
+      "design-review",
+      "code-review"
+    ],
+    "workflows": [
+      "design",
+      "code",
+      "testing",
+      "integration"
+    ],
+    "mcp": [
+      "playwright"
+    ]
+  }
+}

@@ -27,6 +27,12 @@ export interface R2Config {
    * Used for generating public URLs to assets
    */
   publicUrl?: string;
+
+  /**
+   * Optional custom endpoint URL (for local development with MinIO, Supabase S3, etc.)
+   * If not provided, defaults to Cloudflare R2 endpoint
+   */
+  endpoint?: string;
 }
 
 /**

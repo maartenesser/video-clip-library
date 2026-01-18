@@ -23,13 +23,11 @@ export function errorResponse(
   status: number,
   details?: unknown
 ): NextResponse {
-  return NextResponse.json(
-    {
-      error: message,
-      ...(details && { details }),
-    },
-    { status }
-  );
+  const body: { error: string; details?: unknown } = { error: message };
+  if (details !== undefined) {
+    body.details = details;
+  }
+  return NextResponse.json(body, { status });
 }
 
 /**

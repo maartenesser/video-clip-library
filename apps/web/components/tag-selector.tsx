@@ -101,13 +101,13 @@ export function TagSelector({
                 <Badge
                   key={tag.id}
                   variant="secondary"
-                  className="mr-1 mb-1"
+                  className="mr-1 mb-1 pr-0.5 flex items-center"
                   style={getTagColor(tag.color)}
                   data-testid={`selected-tag-${tag.id}`}
                 >
                   {tag.name}
                   <button
-                    className="ml-1 ring-offset-background rounded-full outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
+                    className="ml-1 min-h-[44px] min-w-[44px] -my-2 -mr-1 flex items-center justify-center ring-offset-background rounded-full outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 hover:bg-black/10"
                     onClick={(e) => handleRemoveTag(tag.id, e)}
                     aria-label={`Remove ${tag.name}`}
                   >
@@ -121,8 +121,8 @@ export function TagSelector({
             {selectedTags.length > 0 && (
               <Button
                 variant="ghost"
-                size="sm"
-                className="h-6 w-6 p-0"
+                size="icon"
+                className="h-11 w-11 p-0 min-h-[44px] min-w-[44px]"
                 onClick={handleClearAll}
                 aria-label="Clear all tags"
                 data-testid="clear-all-tags"
@@ -130,7 +130,7 @@ export function TagSelector({
                 <X className="h-4 w-4" />
               </Button>
             )}
-            <ChevronsUpDown className="h-4 w-4 shrink-0 opacity-50" />
+            <ChevronsUpDown className="h-4 w-4 shrink-0 opacity-50" aria-hidden="true" />
           </div>
         </Button>
       </PopoverTrigger>
@@ -142,15 +142,18 @@ export function TagSelector({
                 {category}
               </div>
               {categoryTags.map((tag) => (
-                <div
+                <button
                   key={tag.id}
-                  className="flex items-center gap-2 px-2 py-1.5 rounded-sm hover:bg-accent cursor-pointer"
+                  type="button"
+                  className="flex items-center gap-2 px-2 py-2.5 min-h-[44px] w-full rounded-sm hover:bg-accent cursor-pointer text-left"
                   onClick={() => handleToggleTag(tag.id)}
                   data-testid={`tag-option-${tag.id}`}
+                  aria-pressed={selectedTagIds.includes(tag.id)}
                 >
                   <Checkbox
                     checked={selectedTagIds.includes(tag.id)}
                     className="pointer-events-none"
+                    aria-hidden="true"
                   />
                   <Badge
                     variant="secondary"
@@ -159,7 +162,7 @@ export function TagSelector({
                   >
                     {tag.name}
                   </Badge>
-                </div>
+                </button>
               ))}
             </div>
           ))}

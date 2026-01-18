@@ -222,3 +222,153 @@ class WebhookPayload(BaseModel):
     result: Optional[PipelineResult] = None
     error: Optional[str] = None
     timestamp: datetime = Field(default_factory=datetime.utcnow)
+
+
+# Error Detection Models
+
+
+class SilenceRegionModel(BaseModel):
+    """A detected region of silence in audio."""
+
+    start: float
+    end: float
+    duration: float
+
+
+class FillerWordModel(BaseModel):
+    """A detected filler word."""
+
+    word: str
+    start: float
+    end: float
+    is_phrase: bool = False
+
+
+class HesitationModel(BaseModel):
+    """A detected hesitation or pause."""
+
+    start: float
+    end: float
+    duration: float
+    type: str  # 'pause', 'repetition', 'false_start'
+
+
+class ErrorAnalysisModel(BaseModel):
+    """Complete error analysis for a clip."""
+
+    clip_id: str
+    silence_regions: list[SilenceRegionModel] = Field(default_factory=list)
+    filler_words: list[FillerWordModel] = Field(default_factory=list)
+    hesitations: list[HesitationModel] = Field(default_factory=list)
+    suggested_trim_start: float = 0.0
+    suggested_trim_end: float = 0.0
+    total_filler_words: int = 0
+    total_hesitations: int = 0
+    total_silence_time: float = 0.0
+
+
+# Quality Rating Models
+
+
+class SpeakingQualityMetricsModel(BaseModel):
+    """Metrics for speaking quality assessment."""
+
+    words_per_minute: float = 0.0
+    filler_word_rate: float = 0.0
+    hesitation_rate: float = 0.0
+    sentence_completion_rate: float = 1.0
+
+
+class AudioQualityMetricsModel(BaseModel):
+    """Metrics for audio quality assessment."""
+
+    loudness_lufs: float = -16.0
+    loudness_range: float = 5.0
+    true_peak_db: float = -1.0
+    noise_floor_db: float = -60.0
+    clipping_detected: bool = False
+
+
+class QualityRatingModel(BaseModel):
+    """Complete quality rating for a clip."""
+
+    clip_id: str
+    speaking_quality_score: float = Field(ge=1.0, le=5.0)
+    audio_quality_score: float = Field(ge=1.0, le=5.0)
+    overall_quality_score: float = Field(ge=1.0, le=5.0)
+    words_per_minute: float
+    filler_word_count: int
+    hesitation_count: int
+    trimmed_start_seconds: float
+    trimmed_end_seconds: float
+    speaking_metrics: SpeakingQualityMetricsModel
+    audio_metrics: AudioQualityMetricsModel
+
+
+# Duplicate Detection Models
+
+
+class GroupType(str, Enum):
+    """Type of clip group."""
+
+    DUPLICATE = "duplicate"
+    MULTIPLE_TAKES = "multiple_takes"
+    SAME_TOPIC = "same_topic"
+
+
+class ClipEmbeddingModel(BaseModel):
+    """Embedding for a clip transcript."""
+
+    clip_id: str
+    embedding: list[float]
+    model_name: str = "all-MiniLM-L6-v2"
+
+
+class SimilarityPairModel(BaseModel):
+    """A pair of clips with their similarity score."""
+
+    clip_id_1: str
+    clip_id_2: str
+    similarity: float
+    start_time_1: float = 0.0
+    start_time_2: float = 0.0
+
+
+class ClipGroupModel(BaseModel):
+    """A group of similar clips."""
+
+    group_id: str
+    group_type: GroupType
+    clip_ids: list[str]
+    representative_clip_id: str
+    similarity_scores: dict[str, float] = Field(default_factory=dict)
+
+
+# Extended Pipeline Models
+
+
+class ProcessedClipWithQuality(ProcessedClip):
+    """A processed clip with quality rating and error analysis."""
+
+    quality_rating: Optional[QualityRatingModel] = None
+    error_analysis: Optional[ErrorAnalysisModel] = None
+    embedding: Optional[list[float]] = None
+
+
+class PipelineResultWithQuality(PipelineResult):
+    """Pipeline result with quality ratings, embeddings, and groups."""
+
+    clips: list[ProcessedClipWithQuality]  # Override parent type
+    clip_groups: list[ClipGroupModel] = Field(default_factory=list)
+    embeddings: list[ClipEmbeddingModel] = Field(default_factory=list)
+
+
+class WebhookPayloadWithQuality(BaseModel):
+    """Webhook payload with quality data."""
+
+    job_id: str
+    source_id: str
+    status: ProcessingStatus
+    result: Optional[PipelineResultWithQuality] = None
+    error: Optional[str] = None
+    timestamp: datetime = Field(default_factory=datetime.utcnow)

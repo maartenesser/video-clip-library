@@ -9,10 +9,16 @@ import { createHmac, timingSafeEqual } from 'crypto';
  */
 function verifySignature(payload: string, signature: string | null): boolean {
   const secret = process.env.CLOUDFLARE_WEBHOOK_SECRET;
+  const isProduction = process.env.NODE_ENV === 'production';
 
-  // If no secret is configured, skip verification (for development)
+  // In production, require the webhook secret
   if (!secret) {
-    console.warn('CLOUDFLARE_WEBHOOK_SECRET not configured, skipping signature verification');
+    if (isProduction) {
+      console.error('CLOUDFLARE_WEBHOOK_SECRET not configured in production');
+      return false;
+    }
+    // Allow in development without secret
+    console.warn('CLOUDFLARE_WEBHOOK_SECRET not configured, skipping signature verification (dev only)');
     return true;
   }
 

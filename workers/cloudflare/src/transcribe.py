@@ -134,14 +134,15 @@ class Transcriber:
             )
 
         # Parse response into our models
+        # The OpenAI SDK returns objects with attributes, not dicts
         words = []
         if hasattr(response, "words") and response.words:
             for word_data in response.words:
                 words.append(
                     WordTimestamp(
-                        word=word_data.get("word", ""),
-                        start=word_data.get("start", 0.0),
-                        end=word_data.get("end", 0.0),
+                        word=getattr(word_data, "word", ""),
+                        start=getattr(word_data, "start", 0.0),
+                        end=getattr(word_data, "end", 0.0),
                     )
                 )
 
@@ -150,8 +151,8 @@ class Transcriber:
             for seg in response.segments:
                 # Get words for this segment
                 segment_words = []
-                seg_start = seg.get("start", 0.0)
-                seg_end = seg.get("end", 0.0)
+                seg_start = getattr(seg, "start", 0.0)
+                seg_end = getattr(seg, "end", 0.0)
 
                 for word in words:
                     if word.start >= seg_start and word.end <= seg_end:
@@ -159,7 +160,7 @@ class Transcriber:
 
                 segments.append(
                     TranscriptSegment(
-                        text=seg.get("text", "").strip(),
+                        text=getattr(seg, "text", "").strip(),
                         start=seg_start,
                         end=seg_end,
                         words=segment_words,

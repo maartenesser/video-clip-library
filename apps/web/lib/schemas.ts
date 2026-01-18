@@ -56,6 +56,9 @@ export const listClipsQuerySchema = z.object({
   search: z.string().optional(),
   min_duration: z.coerce.number().nonnegative().optional(),
   max_duration: z.coerce.number().positive().optional(),
+  min_quality: z.coerce.number().min(1).max(5).optional(),
+  include_quality: z.coerce.boolean().optional().default(true),
+  include_groups: z.coerce.boolean().optional().default(false),
   orderBy: z.string().optional().default('created_at'),
   orderDirection: z.enum(['asc', 'desc']).optional().default('desc'),
 });
@@ -100,6 +103,71 @@ export const cloudflareWebhookSchema = z.object({
   error_message: z.string().optional(),
 });
 
+// Processing webhook schema (from Cloudflare Worker pipeline)
+export const processingWebhookClipSchema = z.object({
+  start_time_seconds: z.number().nonnegative(),
+  end_time_seconds: z.number().positive(),
+  file_url: z.string().url(),
+  file_key: z.string().min(1),
+  thumbnail_url: z.string().url().optional().nullable(),
+  transcript_segment: z.string().optional().nullable(),
+  detection_method: z.enum(['scene', 'transcript', 'hybrid']),
+  tags: z.array(z.object({
+    name: z.string().min(1).max(100),
+    confidence_score: z.number().min(0).max(1).optional().nullable(),
+  })).default([]),
+});
+
+export const processingWebhookSchema = z.object({
+  source_id: z.string().uuid(),
+  status: z.enum(['completed', 'failed']),
+  error_message: z.string().max(5000).optional().nullable(),
+  clips: z.array(processingWebhookClipSchema).optional().nullable(),
+  duration_seconds: z.number().positive().optional().nullable(),
+});
+
+// ============================================================================
+// Semantic Search Schemas
+// ============================================================================
+
+export const semanticSearchSchema = z.object({
+  query: z.string().min(1, 'Query is required').max(1000),
+  limit: z.number().int().positive().max(50).optional().default(10),
+  threshold: z.number().min(0).max(1).optional().default(0.5),
+  source_id: z.string().uuid().optional(),
+});
+
+// ============================================================================
+// AI Chat Schemas
+// ============================================================================
+
+export const chatMessageSchema = z.object({
+  role: z.enum(['user', 'assistant']),
+  content: z.string().min(1),
+  clip_ids: z.array(z.string().uuid()).optional().default([]),
+});
+
+export const createChatSchema = z.object({
+  message: z.string().min(1, 'Message is required').max(5000),
+  conversation_id: z.string().uuid().optional(),
+});
+
+// ============================================================================
+// Assembly Schemas
+// ============================================================================
+
+export const createAssemblySchema = z.object({
+  title: z.string().min(1, 'Title is required').max(255),
+  clip_ids: z.array(z.string().uuid()).min(1, 'At least one clip is required'),
+  include_subtitles: z.boolean().optional().default(true),
+  subtitle_style: z.object({
+    font: z.string().optional().default('Arial'),
+    size: z.number().int().positive().optional().default(24),
+    position: z.enum(['bottom', 'top', 'middle']).optional().default('bottom'),
+    color: z.string().optional().default('#FFFFFF'),
+  }).optional(),
+});
+
 // ============================================================================
 // Common Schemas
 // ============================================================================
@@ -117,3 +185,9 @@ export type UpdateClipInput = z.infer<typeof updateClipSchema>;
 export type ListClipsQuery = z.infer<typeof listClipsQuerySchema>;
 export type AddTagsInput = z.infer<typeof addTagsSchema>;
 export type CloudflareWebhookPayload = z.infer<typeof cloudflareWebhookSchema>;
+export type ProcessingWebhookPayload = z.infer<typeof processingWebhookSchema>;
+export type ProcessingWebhookClip = z.infer<typeof processingWebhookClipSchema>;
+export type SemanticSearchInput = z.infer<typeof semanticSearchSchema>;
+export type ChatMessageInput = z.infer<typeof chatMessageSchema>;
+export type CreateChatInput = z.infer<typeof createChatSchema>;
+export type CreateAssemblyInput = z.infer<typeof createAssemblySchema>;

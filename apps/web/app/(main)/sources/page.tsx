@@ -58,7 +58,7 @@ export default function SourcesPage() {
       const transformedSources: Source[] = data.data.map((source: any) => ({
         id: source.id,
         title: source.title,
-        thumbnailUrl: null, // API doesn't return this yet
+        thumbnailUrl: source.thumbnail_url || null,
         status: source.status as SourceStatus,
         durationSeconds: source.duration_seconds,
         creatorName: source.creator_name,
@@ -90,6 +90,11 @@ export default function SourcesPage() {
     const nextPage = page + 1;
     setPage(nextPage);
     fetchSources(nextPage, statusFilter);
+  };
+
+  const handleDelete = (deletedId: string) => {
+    setSources((prev) => prev.filter((s) => s.id !== deletedId));
+    setTotalCount((prev) => prev - 1);
   };
 
   return (
@@ -151,6 +156,7 @@ export default function SourcesPage() {
                 creatorName={source.creatorName}
                 createdAt={source.createdAt}
                 clipCount={source.clipCount}
+                onDelete={handleDelete}
               />
             ))}
           </div>

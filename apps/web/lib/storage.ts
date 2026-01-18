@@ -12,6 +12,7 @@ export function getStorage(): R2Client {
     const secretAccessKey = process.env.R2_SECRET_ACCESS_KEY;
     const bucketName = process.env.R2_BUCKET_NAME;
     const publicUrl = process.env.R2_PUBLIC_URL;
+    const endpoint = process.env.R2_ENDPOINT;
 
     if (!accountId) {
       throw new Error('R2_ACCOUNT_ID environment variable is required');
@@ -32,6 +33,7 @@ export function getStorage(): R2Client {
       secretAccessKey,
       bucketName,
       publicUrl,
+      endpoint,
     });
   }
 
