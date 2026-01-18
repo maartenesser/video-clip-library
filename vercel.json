@@ -1,8 +1,7 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "version": 2,
-  "framework": null,
+  "buildCommand": "cd apps/web && next build",
   "installCommand": "pnpm install --frozen-lockfile",
-  "buildCommand": "pnpm --filter @video-clip-library/web build",
+  "framework": "nextjs",
   "outputDirectory": "apps/web/.next"
 }
