@@ -319,6 +319,23 @@ export default function ClipsPage() {
         )}
       </div>
 
+      {/* Color legend for similar clips */}
+      <div className="flex flex-wrap items-center gap-4 px-4 py-3 bg-muted/50 rounded-lg border">
+        <span className="text-sm font-medium text-muted-foreground">Similarity:</span>
+        <div className="flex items-center gap-2">
+          <div className="w-4 h-4 rounded border-l-4 border-l-red-500 bg-background border" />
+          <span className="text-sm">Duplicate (≥95%)</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <div className="w-4 h-4 rounded border-l-4 border-l-purple-500 bg-background border" />
+          <span className="text-sm">Multiple Takes (≥85%)</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <div className="w-4 h-4 rounded border-l-4 border-l-blue-500 bg-background border" />
+          <span className="text-sm">Same Topic (≥75%)</span>
+        </div>
+      </div>
+
       {/* Clip grid with filters */}
       <ClipGrid
         clips={clips}
