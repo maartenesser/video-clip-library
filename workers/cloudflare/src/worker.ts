@@ -16,19 +16,23 @@ interface ExtendedEnv extends Env {
   SUPABASE_SERVICE_KEY: string;
 }
 
+// Helper to delay for a given number of milliseconds
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 /**
  * VideoProcessor Durable Object that wraps the Python container.
  * Each instance manages a single container.
  */
 export class VideoProcessor extends DurableObject<ExtendedEnv> {
-  private container: any | null = null;
-
   async fetch(request: Request): Promise<Response> {
-    // Get or start the container
-    if (!this.container) {
+    // Start the container if not already running
+    // @ts-ignore - Container API is provided by Cloudflare runtime
+    if (!this.ctx.container.running) {
       try {
         // @ts-ignore - Container API is provided by Cloudflare runtime
-        this.container = await this.ctx.container.start({
+        await this.ctx.container.start({
           env: {
             OPENAI_API_KEY: this.env.OPENAI_API_KEY || '',
             R2_ACCESS_KEY_ID: this.env.R2_ACCESS_KEY_ID || '',
@@ -53,29 +57,48 @@ export class VideoProcessor extends DurableObject<ExtendedEnv> {
       }
     }
 
-    // Forward the request to the container
+    // Forward the request to the container using getTcpPort
     const url = new URL(request.url);
-    const containerUrl = `http://localhost:8080${url.pathname}${url.search}`;
+    const containerUrl = `http://container${url.pathname}${url.search}`;
 
-    const containerRequest = new Request(containerUrl, {
-      method: request.method,
-      headers: request.headers,
-      body: request.body,
-    });
+    // @ts-ignore - Container API is provided by Cloudflare runtime
+    const port = this.ctx.container.getTcpPort(8080);
 
-    try {
-      const response = await this.container.fetch(containerRequest);
-      return response;
-    } catch (error) {
-      console.error('Container request failed:', error);
-      return new Response(JSON.stringify({
-        error: 'Container request failed',
-        details: error instanceof Error ? error.message : 'Unknown error'
-      }), {
-        status: 500,
-        headers: { 'Content-Type': 'application/json' },
-      });
+    // Retry logic - container may take time to be ready after start()
+    const maxRetries = 5;
+    const retryDelayMs = 2000;
+    let lastError: Error | null = null;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const containerRequest = new Request(containerUrl, {
+          method: request.method,
+          headers: request.headers,
+          body: attempt === 1 ? request.body : null, // Only send body on first attempt
+        });
+
+        const response = await port.fetch(containerRequest);
+        return response;
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+        console.error(`Container request attempt ${attempt}/${maxRetries} failed:`, lastError.message);
+
+        if (attempt < maxRetries) {
+          // Wait before retrying
+          await sleep(retryDelayMs);
+        }
+      }
     }
+
+    // All retries exhausted
+    return new Response(JSON.stringify({
+      error: 'Container request failed after retries',
+      details: lastError?.message || 'Unknown error',
+      retries: maxRetries
+    }), {
+      status: 503,
+      headers: { 'Content-Type': 'application/json' },
+    });
   }
 }
 
