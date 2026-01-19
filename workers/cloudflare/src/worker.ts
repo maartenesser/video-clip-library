@@ -64,6 +64,8 @@ export class VideoProcessor extends DurableObject<ExtendedEnv> {
     // @ts-ignore - Container API is provided by Cloudflare runtime
     const port = this.ctx.container.getTcpPort(8080);
 
+    const requestBody = request.body ? await request.arrayBuffer() : null;
+
     // Retry logic - container may take time to be ready after start()
     const maxRetries = 5;
     const retryDelayMs = 2000;
@@ -74,7 +76,7 @@ export class VideoProcessor extends DurableObject<ExtendedEnv> {
         const containerRequest = new Request(containerUrl, {
           method: request.method,
           headers: request.headers,
-          body: attempt === 1 ? request.body : null, // Only send body on first attempt
+          body: requestBody ? requestBody.slice(0) : null,
         });
 
         const response = await port.fetch(containerRequest);
