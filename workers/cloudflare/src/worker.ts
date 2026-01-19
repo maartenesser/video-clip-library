@@ -26,6 +26,24 @@ function sleep(ms: number): Promise<void> {
  * Each instance manages a single container.
  */
 export class VideoProcessor extends DurableObject<ExtendedEnv> {
+  private async waitForContainerReady(port: { fetch: (input: Request | string, init?: RequestInit) => Promise<Response> }): Promise<void> {
+    const maxChecks = 10;
+    const delayMs = 1000;
+
+    for (let attempt = 1; attempt <= maxChecks; attempt++) {
+      try {
+        const response = await port.fetch('http://container/ready');
+        if (response.ok) {
+          return;
+        }
+      } catch (error) {
+        console.error(`Container readiness check ${attempt}/${maxChecks} failed:`, error);
+      }
+
+      await sleep(delayMs);
+    }
+  }
+
   async fetch(request: Request): Promise<Response> {
     // Start the container if not already running
     // @ts-ignore - Container API is provided by Cloudflare runtime
@@ -63,6 +81,8 @@ export class VideoProcessor extends DurableObject<ExtendedEnv> {
 
     // @ts-ignore - Container API is provided by Cloudflare runtime
     const port = this.ctx.container.getTcpPort(8080);
+
+    await this.waitForContainerReady(port);
 
     const requestBody = request.body ? await request.arrayBuffer() : null;
 
