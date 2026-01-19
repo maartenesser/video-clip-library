@@ -1,6 +1,10 @@
 """Video processing pipeline orchestrator."""
 
 import asyncio
+import hashlib
+import hmac
+import json
+import os
 import tempfile
 import time
 import uuid
@@ -30,8 +34,6 @@ from .models import (
     SpeakingQualityMetricsModel,
     TagScore,
     TranscriptResult,
-    WebhookPayload,
-    WebhookPayloadWithQuality,
 )
 from .r2_client import R2Client, get_r2_client
 from .scene_detect import SceneDetector
@@ -163,7 +165,7 @@ class VideoPipeline:
         self,
         clips: list,
         source_id: str,
-    ) -> list[tuple[str, str]]:
+    ) -> list[dict]:
         """Upload processed clips to R2.
 
         Args:
@@ -176,9 +178,11 @@ class VideoPipeline:
         logger.info("Uploading clips to R2", total=len(clips))
 
         upload_tasks = []
+        clip_keys = []
         for clip in clips:
             video_key = f"clips/{source_id}/{clip.clip_id}.mp4"
             thumb_key = f"clips/{source_id}/{clip.clip_id}_thumb.jpg"
+            clip_keys.append((video_key, thumb_key))
 
             upload_tasks.append(
                 self.r2_client.upload_file(
@@ -196,20 +200,32 @@ class VideoPipeline:
             )
 
         results = await asyncio.gather(*upload_tasks, return_exceptions=True)
+        failures = [result for result in results if isinstance(result, Exception)]
+        if failures:
+            raise PipelineError(f"Failed to upload {len(failures)} clip assets to R2")
 
-        # Pair up video and thumbnail URLs
-        urls = []
+        # Pair up video and thumbnail URLs with keys
+        uploads = []
         for i in range(0, len(results), 2):
+            clip_index = i // 2
+            video_key, thumb_key = clip_keys[clip_index]
             video_url = results[i] if not isinstance(results[i], Exception) else ""
             thumb_url = results[i + 1] if not isinstance(results[i + 1], Exception) else ""
-            urls.append((video_url, thumb_url))
+            uploads.append(
+                {
+                    "video_url": video_url,
+                    "thumbnail_url": thumb_url,
+                    "video_key": video_key,
+                    "thumbnail_key": thumb_key,
+                }
+            )
 
-        return urls
+        return uploads
 
     async def call_webhook(
         self,
         webhook_url: str,
-        payload: WebhookPayload,
+        payload: dict,
         timeout: float = 30.0,
         retries: int = 3,
     ) -> bool:
@@ -224,16 +240,27 @@ class VideoPipeline:
         Returns:
             True if webhook succeeded, False otherwise
         """
-        logger.info("Calling webhook", url=webhook_url, status=payload.status)
+        logger.info("Calling webhook", url=webhook_url, status=payload.get("status"))
+
+        secret = os.getenv("WEBHOOK_SECRET", "")
+        body = json.dumps(payload, separators=(",", ":"), default=str)
+        headers = {"Content-Type": "application/json"}
+        if secret:
+            signature = hmac.new(
+                secret.encode("utf-8"),
+                body.encode("utf-8"),
+                hashlib.sha256,
+            ).hexdigest()
+            headers["x-webhook-signature"] = signature
 
         async with httpx.AsyncClient() as client:
             for attempt in range(retries):
                 try:
                     response = await client.post(
                         webhook_url,
-                        json=payload.model_dump(mode="json"),
+                        content=body,
                         timeout=timeout,
-                        headers={"Content-Type": "application/json"},
+                        headers=headers,
                     )
 
                     if response.status_code < 400:
@@ -257,7 +284,7 @@ class VideoPipeline:
                     )
 
                 if attempt < retries - 1:
-                    await asyncio.sleep(2**attempt)  # Exponential backoff
+                await asyncio.sleep(2**attempt)  # Exponential backoff
 
         logger.error("Webhook failed after all retries")
         return False
@@ -364,7 +391,7 @@ class VideoPipeline:
 
                 # Step 7: Upload clips to R2
                 logger.info("Step 7: Uploading clips to R2", job_id=job_id)
-                upload_urls = await self.upload_clips(clip_results, source_id)
+                upload_results = await self.upload_clips(clip_results, source_id)
 
                 # Initialize quality analysis data
                 error_analyses = []
@@ -432,7 +459,13 @@ class VideoPipeline:
                 processed_clips = []
                 for i, clip in enumerate(clip_results):
                     tag_result = tag_map.get(clip.clip_id)
-                    video_url, thumbnail_url = upload_urls[i] if i < len(upload_urls) else ("", "")
+                    upload_result = (
+                        upload_results[i]
+                        if i < len(upload_results)
+                        else {"video_url": "", "thumbnail_url": "", "video_key": "", "thumbnail_key": ""}
+                    )
+                    video_url = upload_result["video_url"]
+                    thumbnail_url = upload_result["thumbnail_url"]
                     error_analysis = error_map.get(clip.clip_id)
                     quality_rating = quality_map.get(clip.clip_id)
 
@@ -542,13 +575,44 @@ class VideoPipeline:
                     processing_time=processing_time,
                 )
 
-                # Call webhook with quality data
-                webhook_payload = WebhookPayloadWithQuality(
-                    job_id=job_id,
-                    source_id=source_id,
-                    status=ProcessingStatus.COMPLETED,
-                    result=result,
-                )
+                # Call webhook with processing payload expected by the web app
+                webhook_clips = []
+                for i, clip in enumerate(clip_results):
+                    upload_result = (
+                        upload_results[i]
+                        if i < len(upload_results)
+                        else {"video_url": "", "thumbnail_url": "", "video_key": "", "thumbnail_key": ""}
+                    )
+                    tag_result = tag_map.get(clip.clip_id)
+                    tags = []
+                    if tag_result:
+                        tags = [
+                            {
+                                "name": tag.tag.value,
+                                "confidence_score": tag.confidence,
+                            }
+                            for tag in tag_result.all_tags
+                        ]
+
+                    webhook_clips.append(
+                        {
+                            "start_time_seconds": clip.start_time,
+                            "end_time_seconds": clip.end_time,
+                            "file_url": upload_result["video_url"],
+                            "file_key": upload_result["video_key"],
+                            "thumbnail_url": upload_result["thumbnail_url"] or None,
+                            "transcript_segment": clip.transcript or None,
+                            "detection_method": "hybrid",
+                            "tags": tags,
+                        }
+                    )
+
+                webhook_payload = {
+                    "source_id": source_id,
+                    "status": "completed",
+                    "clips": webhook_clips,
+                    "duration_seconds": transcript.duration,
+                }
                 await self.call_webhook(webhook_url, webhook_payload)
 
                 return result
@@ -563,12 +627,11 @@ class VideoPipeline:
             )
 
             # Call webhook with error
-            error_payload = WebhookPayload(
-                job_id=job_id,
-                source_id=source_id,
-                status=ProcessingStatus.FAILED,
-                error=str(e),
-            )
+            error_payload = {
+                "source_id": source_id,
+                "status": "failed",
+                "error_message": str(e),
+            }
             await self.call_webhook(webhook_url, error_payload)
 
             raise PipelineError(f"Pipeline failed: {str(e)}") from e
