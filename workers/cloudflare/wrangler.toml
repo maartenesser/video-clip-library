@@ -25,6 +25,22 @@ new_sqlite_classes = ["VideoProcessor"]
 [vars]
 ENVIRONMENT = "production"
 
+# Observability configuration
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+persist = true
+invocation_logs = true
+
+[observability.traces]
+enabled = false
+persist = true
+head_sampling_rate = 1
+
 # R2 bucket binding
 [[r2_buckets]]
 binding = "VIDEO_BUCKET"

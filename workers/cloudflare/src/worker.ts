@@ -146,12 +146,14 @@ export default {
 
       // For /process, use source_id from body as instance key for load balancing
       let instanceId = 'default';
+      const hasBody = request.method !== 'GET' && request.method !== 'HEAD' && request.body;
+      const requestBody = hasBody ? await request.arrayBuffer() : null;
 
       if (url.pathname === '/process' && request.method === 'POST') {
-        // Clone request to read body while preserving original
-        const clonedRequest = request.clone();
         try {
-          const body = await clonedRequest.json() as { source_id?: string };
+          const body = requestBody
+            ? JSON.parse(new TextDecoder().decode(requestBody))
+            : null;
           if (body.source_id) {
             instanceId = body.source_id;
           }
@@ -165,8 +167,13 @@ export default {
       const id = env.VIDEO_PROCESSOR.idFromName(instanceId);
       const stub = env.VIDEO_PROCESSOR.get(id);
 
-      // Forward to the Durable Object
-      const response = await stub.fetch(request);
+      // Forward to the Durable Object with a reusable body
+      const forwardRequest = new Request(request.url, {
+        method: request.method,
+        headers: request.headers,
+        body: requestBody ? requestBody.slice(0) : null,
+      });
+      const response = await stub.fetch(forwardRequest);
 
       // Add CORS headers to response
       const newResponse = new Response(response.body, response);
