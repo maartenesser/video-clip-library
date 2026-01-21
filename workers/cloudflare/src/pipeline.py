@@ -284,7 +284,7 @@ class VideoPipeline:
                     )
 
                 if attempt < retries - 1:
-                await asyncio.sleep(2**attempt)  # Exponential backoff
+                    await asyncio.sleep(2**attempt)  # Exponential backoff
 
         logger.error("Webhook failed after all retries")
         return False

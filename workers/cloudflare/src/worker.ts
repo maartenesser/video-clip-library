@@ -45,12 +45,27 @@ export class VideoProcessor extends DurableObject<ExtendedEnv> {
   }
 
   async fetch(request: Request): Promise<Response> {
-    // Start the container if not already running
-    // @ts-ignore - Container API is provided by Cloudflare runtime
-    if (!this.ctx.container.running) {
-      try {
-        // @ts-ignore - Container API is provided by Cloudflare runtime
-        await this.ctx.container.start({
+    try {
+      // @ts-ignore - Container API is provided by Cloudflare runtime
+      const container = this.ctx.container;
+      if (!container) {
+        console.error('Container API not available on context');
+        return new Response(JSON.stringify({
+          error: 'Container API not available',
+          details: 'this.ctx.container is undefined'
+        }), {
+          status: 500,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      const isRunning = container.running;
+      console.log('Container running state:', isRunning);
+
+      // Start the container if not already running
+      if (!isRunning) {
+        console.log('Starting container...');
+        await container.start({
           env: {
             OPENAI_API_KEY: this.env.OPENAI_API_KEY || '',
             R2_ACCESS_KEY_ID: this.env.R2_ACCESS_KEY_ID || '',
@@ -63,16 +78,20 @@ export class VideoProcessor extends DurableObject<ExtendedEnv> {
             SUPABASE_SERVICE_KEY: this.env.SUPABASE_SERVICE_KEY || '',
           },
         });
-      } catch (error) {
-        console.error('Failed to start container:', error);
-        return new Response(JSON.stringify({
-          error: 'Failed to start container',
-          details: error instanceof Error ? error.message : 'Unknown error'
-        }), {
-          status: 500,
-          headers: { 'Content-Type': 'application/json' },
-        });
+        console.log('Container start() completed, running:', container.running);
+
+        // Give container time to initialize
+        await sleep(3000);
       }
+    } catch (error) {
+      console.error('Container initialization error:', error);
+      return new Response(JSON.stringify({
+        error: 'Failed to initialize container',
+        details: error instanceof Error ? error.message : 'Unknown error'
+      }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' },
+      });
     }
 
     // Forward the request to the container using getTcpPort
@@ -80,7 +99,8 @@ export class VideoProcessor extends DurableObject<ExtendedEnv> {
     const containerUrl = `http://container${url.pathname}${url.search}`;
 
     // @ts-ignore - Container API is provided by Cloudflare runtime
-    const port = this.ctx.container.getTcpPort(8080);
+    const container = this.ctx.container;
+    const port = container.getTcpPort(8080);
 
     await this.waitForContainerReady(port);
 
