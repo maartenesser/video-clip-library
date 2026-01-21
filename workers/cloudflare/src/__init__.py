@@ -1,3 +1,3 @@
 """Video Processing Pipeline for Cloudflare Containers."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.4"

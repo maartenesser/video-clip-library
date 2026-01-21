@@ -20,6 +20,7 @@ from .models import (
     ProcessVideoResponse,
 )
 from .pipeline import VideoPipeline
+from .local_pipeline import LocalVideoPipeline
 
 # Configure structured logging
 structlog.configure(
@@ -110,6 +111,263 @@ async def readiness_check():
         )
 
     return {"status": "ready"}
+
+
+@app.get("/debug/env")
+async def debug_env():
+    """Debug endpoint to check environment variables."""
+    return {
+        "has_openai_key": bool(os.getenv("OPENAI_API_KEY")),
+        "has_r2_access_key": bool(os.getenv("R2_ACCESS_KEY_ID")),
+        "has_r2_secret_key": bool(os.getenv("R2_SECRET_ACCESS_KEY")),
+        "r2_endpoint": os.getenv("R2_ENDPOINT_URL", "NOT SET"),
+        "r2_bucket": os.getenv("R2_BUCKET_NAME", "NOT SET"),
+        "has_webhook_secret": bool(os.getenv("WEBHOOK_SECRET")),
+        "has_supabase_url": bool(os.getenv("SUPABASE_URL")),
+    }
+
+
+@app.get("/debug/r2-test")
+async def debug_r2_test():
+    """Test R2 connectivity by listing files."""
+    try:
+        from .r2_client import get_r2_client
+        client = get_r2_client()
+        files = await client.list_files(prefix="sources/", max_keys=3)
+        return {
+            "status": "ok",
+            "files_found": len(files),
+            "sample_files": [f["key"] for f in files[:3]],
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e),
+            "error_type": type(e).__name__,
+        }
+
+
+@app.post("/debug/process-video-test")
+async def debug_process_video_test(request: Request):
+    """Debug endpoint to test video processing with detailed output."""
+    import base64
+    import tempfile
+    from pathlib import Path
+
+    try:
+        video_bytes = await request.body()
+        source_id = request.query_params.get("source_id", "test")
+
+        if not video_bytes:
+            return {"error": "No video data"}
+
+        results = {
+            "video_size": len(video_bytes),
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            video_path = str(Path(temp_dir) / "source.mp4")
+            with open(video_path, "wb") as f:
+                f.write(video_bytes)
+
+            results["video_saved"] = True
+
+            # Test scene detection
+            from .scene_detect import SceneDetector
+            detector = SceneDetector()
+            try:
+                scene_result = detector.detect_scenes(video_path)
+                results["scene_detection"] = {
+                    "success": True,
+                    "total_scenes": scene_result.total_scenes,
+                    "video_duration": scene_result.video_duration,
+                    "fps": scene_result.fps,
+                    "scenes": [
+                        {
+                            "start": s.start_time,
+                            "end": s.end_time,
+                            "duration": s.duration,
+                        }
+                        for s in scene_result.scenes
+                    ],
+                }
+            except Exception as e:
+                results["scene_detection"] = {
+                    "success": False,
+                    "error": str(e),
+                }
+
+            # Test clip creation
+            if results.get("scene_detection", {}).get("success"):
+                from .split_video import create_clip_definitions
+                try:
+                    clip_defs = create_clip_definitions(
+                        scenes=scene_result.scenes,
+                        transcript_segments=[],
+                        min_duration=1.0,
+                        max_duration=60.0,
+                        source_id=source_id,
+                    )
+                    results["clip_definitions"] = {
+                        "success": True,
+                        "count": len(clip_defs),
+                        "clips": [
+                            {
+                                "id": c.clip_id,
+                                "start": c.start_time,
+                                "end": c.end_time,
+                            }
+                            for c in clip_defs
+                        ],
+                    }
+                except Exception as e:
+                    results["clip_definitions"] = {
+                        "success": False,
+                        "error": str(e),
+                    }
+
+        return results
+
+    except Exception as e:
+        return {"error": str(e), "error_type": type(e).__name__}
+
+
+@app.get("/debug/network-test")
+async def debug_network_test():
+    """Test general network connectivity from container."""
+    import httpx
+    results = {}
+
+    # Test 1: Public internet (httpbin)
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get("https://httpbin.org/ip")
+            results["httpbin"] = {
+                "status": "ok",
+                "response": resp.json(),
+            }
+    except Exception as e:
+        results["httpbin"] = {
+            "status": "error",
+            "error": str(e),
+            "error_type": type(e).__name__,
+        }
+
+    # Test 2: Cloudflare's own endpoint
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get("https://cloudflare.com/cdn-cgi/trace")
+            results["cloudflare"] = {
+                "status": "ok",
+                "response": resp.text,
+            }
+    except Exception as e:
+        results["cloudflare"] = {
+            "status": "error",
+            "error": str(e),
+            "error_type": type(e).__name__,
+        }
+
+    # Test 3: R2 endpoint directly with simple GET
+    r2_endpoint = os.getenv("R2_ENDPOINT_URL", "")
+    if r2_endpoint:
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(r2_endpoint)
+                results["r2_direct"] = {
+                    "status": "reachable",
+                    "status_code": resp.status_code,
+                }
+        except Exception as e:
+            results["r2_direct"] = {
+                "status": "error",
+                "error": str(e),
+                "error_type": type(e).__name__,
+            }
+
+    return results
+
+
+@app.post("/process-local")
+async def process_video_local(request: Request):
+    """Process video bytes locally (no network access needed).
+
+    This endpoint accepts video bytes directly from the Worker,
+    processes them locally (scene detection, clip splitting),
+    and returns the processed clips as base64-encoded data.
+
+    The Worker is responsible for:
+    - Downloading video from R2
+    - Uploading clips to R2
+    - Calling OpenAI for transcription
+    - Calling webhooks
+    """
+    import base64
+
+    try:
+        # Get request body as bytes
+        video_bytes = await request.body()
+
+        if not video_bytes:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "No video data provided"},
+            )
+
+        # Get parameters from query string
+        source_id = request.query_params.get("source_id", str(uuid.uuid4()))
+        min_clip_duration = float(request.query_params.get("min_clip_duration", "3.0"))
+        max_clip_duration = float(request.query_params.get("max_clip_duration", "20.0"))
+        min_scene_length = float(request.query_params.get("min_scene_length", "1.5"))
+
+        logger.info(
+            "Received local processing request",
+            source_id=source_id,
+            video_size=len(video_bytes),
+        )
+
+        # Process video locally
+        pipeline = LocalVideoPipeline()
+        result = await pipeline.process_video_bytes(
+            video_bytes=video_bytes,
+            source_id=source_id,
+            min_clip_duration=min_clip_duration,
+            max_clip_duration=max_clip_duration,
+            min_scene_length=min_scene_length,
+        )
+
+        if result.error:
+            return JSONResponse(
+                status_code=500,
+                content={"error": result.error},
+            )
+
+        # Encode clips as base64 for JSON response
+        clips_data = []
+        for clip in result.clips:
+            clips_data.append({
+                "clip_id": clip.clip_id,
+                "start_time": clip.start_time,
+                "end_time": clip.end_time,
+                "duration": clip.duration,
+                "video_base64": base64.b64encode(clip.video_data).decode("utf-8"),
+                "thumbnail_base64": base64.b64encode(clip.thumbnail_data).decode("utf-8") if clip.thumbnail_data else None,
+            })
+
+        return {
+            "job_id": result.job_id,
+            "total_duration": result.total_duration,
+            "processing_time_seconds": result.processing_time_seconds,
+            "total_clips": len(clips_data),
+            "clips": clips_data,
+        }
+
+    except Exception as e:
+        logger.error("Local processing endpoint failed", error=str(e))
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)},
+        )
 
 
 @app.post("/process", response_model=ProcessVideoResponse)

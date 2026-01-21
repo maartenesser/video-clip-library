@@ -144,6 +144,36 @@ export class VideoProcessor extends DurableObject<ExtendedEnv> {
   }
 }
 
+// Interface for process request
+interface ProcessRequest {
+  source_id: string;
+  video_url: string;  // This is actually the R2 key
+  webhook_url: string;
+  min_clip_duration?: number;
+  max_clip_duration?: number;
+  min_scene_length?: number;
+}
+
+// Interface for clip result from container
+interface ContainerClip {
+  clip_id: string;
+  start_time: number;
+  end_time: number;
+  duration: number;
+  video_base64: string;
+  thumbnail_base64: string | null;
+}
+
+// Interface for container response
+interface ContainerResponse {
+  job_id: string;
+  total_duration: number;
+  processing_time_seconds: number;
+  total_clips: number;
+  clips: ContainerClip[];
+  error?: string;
+}
+
 /**
  * Main Worker fetch handler.
  * Routes requests to appropriate Durable Object instances.
@@ -178,30 +208,159 @@ export default {
       });
     }
 
-    // Route to container for processing endpoints
-    if (url.pathname.startsWith('/process') ||
-        url.pathname.startsWith('/health') ||
-        url.pathname.startsWith('/ready') ||
-        url.pathname.startsWith('/jobs')) {
+    // NEW: Full orchestration endpoint - Worker handles R2 + container + webhook
+    if (url.pathname === '/process' && request.method === 'POST') {
+      try {
+        const body = await request.json() as ProcessRequest;
+        console.log('Received process request:', JSON.stringify(body));
 
-      // For /process, use source_id from body as instance key for load balancing
-      let instanceId = 'default';
+        const { source_id, video_url, webhook_url } = body;
+        const min_clip_duration = body.min_clip_duration ?? 3.0;
+        const max_clip_duration = body.max_clip_duration ?? 20.0;
+        const min_scene_length = body.min_scene_length ?? 1.5;
+
+        // Step 1: Download video from R2 using binding
+        console.log('Step 1: Downloading video from R2:', video_url);
+        const r2Object = await env.VIDEO_BUCKET.get(video_url);
+
+        if (!r2Object) {
+          console.error('Video not found in R2:', video_url);
+          return new Response(JSON.stringify({
+            error: 'Video not found in R2',
+            key: video_url,
+          }), {
+            status: 404,
+            headers: { 'Content-Type': 'application/json', ...corsHeaders },
+          });
+        }
+
+        const videoBytes = await r2Object.arrayBuffer();
+        console.log('Downloaded video, size:', videoBytes.byteLength);
+
+        // Step 2: Send video to container for processing
+        console.log('Step 2: Sending video to container for local processing');
+        const instanceId = 'default-v7';
+        const id = env.VIDEO_PROCESSOR.idFromName(instanceId);
+        const stub = env.VIDEO_PROCESSOR.get(id);
+
+        const containerUrl = new URL(request.url);
+        containerUrl.pathname = '/process-local';
+        containerUrl.search = `?source_id=${encodeURIComponent(source_id)}&min_clip_duration=${min_clip_duration}&max_clip_duration=${max_clip_duration}&min_scene_length=${min_scene_length}`;
+
+        const containerRequest = new Request(containerUrl.toString(), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/octet-stream' },
+          body: videoBytes,
+        });
+
+        const containerResponse = await stub.fetch(containerRequest);
+
+        if (!containerResponse.ok) {
+          const errorText = await containerResponse.text();
+          console.error('Container processing failed:', errorText);
+
+          // Call webhook with error
+          await callWebhook(webhook_url, {
+            source_id,
+            status: 'failed',
+            error_message: `Container processing failed: ${errorText}`,
+          }, env.WEBHOOK_SECRET);
+
+          return new Response(JSON.stringify({
+            error: 'Container processing failed',
+            details: errorText,
+          }), {
+            status: 500,
+            headers: { 'Content-Type': 'application/json', ...corsHeaders },
+          });
+        }
+
+        const containerResult = await containerResponse.json() as ContainerResponse;
+        console.log('Container processing complete, clips:', containerResult.total_clips);
+
+        // Step 3: Upload clips to R2
+        console.log('Step 3: Uploading clips to R2');
+        const uploadedClips = [];
+
+        for (const clip of containerResult.clips) {
+          const videoKey = `clips/${source_id}/${clip.clip_id}.mp4`;
+          const thumbnailKey = `clips/${source_id}/${clip.clip_id}_thumb.jpg`;
+
+          // Decode base64 and upload video
+          const videoData = Uint8Array.from(atob(clip.video_base64), c => c.charCodeAt(0));
+          await env.VIDEO_BUCKET.put(videoKey, videoData, {
+            httpMetadata: { contentType: 'video/mp4' },
+          });
+
+          // Upload thumbnail if exists
+          let thumbnailUrl = null;
+          if (clip.thumbnail_base64) {
+            const thumbnailData = Uint8Array.from(atob(clip.thumbnail_base64), c => c.charCodeAt(0));
+            await env.VIDEO_BUCKET.put(thumbnailKey, thumbnailData, {
+              httpMetadata: { contentType: 'image/jpeg' },
+            });
+            thumbnailUrl = `https://${env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com/video-clips/${thumbnailKey}`;
+          }
+
+          uploadedClips.push({
+            start_time_seconds: clip.start_time,
+            end_time_seconds: clip.end_time,
+            file_url: `https://${env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com/video-clips/${videoKey}`,
+            file_key: videoKey,
+            thumbnail_url: thumbnailUrl,
+            transcript_segment: null, // Transcription not done in container
+            detection_method: 'scene-detection',
+            tags: [], // Tagging not done in container
+          });
+        }
+
+        console.log('Uploaded clips to R2:', uploadedClips.length);
+
+        // Step 4: Call webhook with results
+        console.log('Step 4: Calling webhook');
+        const webhookPayload = {
+          source_id,
+          status: 'completed',
+          clips: uploadedClips,
+          duration_seconds: containerResult.total_duration,
+        };
+
+        const webhookSuccess = await callWebhook(webhook_url, webhookPayload, env.WEBHOOK_SECRET);
+        console.log('Webhook called, success:', webhookSuccess);
+
+        return new Response(JSON.stringify({
+          job_id: containerResult.job_id,
+          source_id,
+          status: 'completed',
+          message: 'Video processing completed',
+          total_clips: uploadedClips.length,
+        }), {
+          headers: { 'Content-Type': 'application/json', ...corsHeaders },
+        });
+
+      } catch (error) {
+        console.error('Process endpoint error:', error);
+        return new Response(JSON.stringify({
+          error: 'Processing failed',
+          details: error instanceof Error ? error.message : String(error),
+        }), {
+          status: 500,
+          headers: { 'Content-Type': 'application/json', ...corsHeaders },
+        });
+      }
+    }
+
+    // Route to container for other endpoints
+    if (url.pathname.startsWith('/health') ||
+        url.pathname.startsWith('/ready') ||
+        url.pathname.startsWith('/jobs') ||
+        url.pathname.startsWith('/debug') ||
+        url.pathname.startsWith('/process-local')) {
+
+      // Use a single instance for now to simplify debugging
+      const instanceId = 'default-v7';
       const hasBody = request.method !== 'GET' && request.method !== 'HEAD' && request.body;
       const requestBody = hasBody ? await request.arrayBuffer() : null;
-
-      if (url.pathname === '/process' && request.method === 'POST') {
-        try {
-          const body = requestBody
-            ? JSON.parse(new TextDecoder().decode(requestBody))
-            : null;
-          if (body.source_id) {
-            instanceId = body.source_id;
-          }
-        } catch (e) {
-          // If body parsing fails, use default instance
-          console.error('Failed to parse request body:', e);
-        }
-      }
 
       // Get the Durable Object stub
       const id = env.VIDEO_PROCESSOR.idFromName(instanceId);
@@ -233,3 +392,52 @@ export default {
     });
   },
 };
+
+/**
+ * Call webhook with payload and HMAC signature.
+ */
+async function callWebhook(
+  webhookUrl: string,
+  payload: Record<string, unknown>,
+  secret: string
+): Promise<boolean> {
+  try {
+    const body = JSON.stringify(payload);
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+
+    if (secret) {
+      // Create HMAC signature
+      const encoder = new TextEncoder();
+      const key = await crypto.subtle.importKey(
+        'raw',
+        encoder.encode(secret),
+        { name: 'HMAC', hash: 'SHA-256' },
+        false,
+        ['sign']
+      );
+      const signature = await crypto.subtle.sign(
+        'HMAC',
+        key,
+        encoder.encode(body)
+      );
+      const signatureHex = Array.from(new Uint8Array(signature))
+        .map(b => b.toString(16).padStart(2, '0'))
+        .join('');
+      headers['x-webhook-signature'] = signatureHex;
+    }
+
+    const response = await fetch(webhookUrl, {
+      method: 'POST',
+      headers,
+      body,
+    });
+
+    console.log('Webhook response status:', response.status);
+    return response.ok;
+  } catch (error) {
+    console.error('Webhook call failed:', error);
+    return false;
+  }
+}

@@ -94,6 +94,21 @@ export async function POST(request: NextRequest) {
         const protocol = process.env.NODE_ENV === 'production' ? 'https' : 'http';
         const webhookUrl = `${protocol}://${baseUrl}/api/webhooks/processing`;
 
+        // Extract R2 key from the stored value
+        // Handle case where original_file_key might contain a full URL (bug workaround)
+        let videoKey = source.original_file_key;
+        if (videoKey.startsWith('http://') || videoKey.startsWith('https://')) {
+          // Extract the path after the domain
+          try {
+            const url = new URL(videoKey);
+            videoKey = url.pathname.replace(/^\//, ''); // Remove leading slash
+          } catch {
+            // If URL parsing fails, try to extract path after common patterns
+            videoKey = videoKey.replace(/^https?:\/\/[^\/]+\//, '');
+          }
+          console.warn(`Extracted R2 key from URL: ${source.original_file_key} -> ${videoKey}`);
+        }
+
         const workerResponse = await fetch(`${WORKER_URL}/process`, {
           method: 'POST',
           headers: {
@@ -101,7 +116,8 @@ export async function POST(request: NextRequest) {
           },
           body: JSON.stringify({
             source_id: source.id,
-            video_url: source.original_file_url,
+            // Use extracted R2 key
+            video_url: videoKey,
             webhook_url: webhookUrl,
             min_clip_duration: 3,
             max_clip_duration: 20,
