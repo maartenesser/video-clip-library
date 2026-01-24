@@ -146,12 +146,11 @@ class VideoPipeline:
             from urllib.parse import urlparse
 
             parsed = urlparse(video_url)
+            # Use the full path as the key (minus leading slash)
+            # The path IS the key - don't strip any prefix
             key = parsed.path.lstrip("/")
-            # Remove bucket name from path if present
-            parts = key.split("/", 1)
-            if len(parts) > 1:
-                key = parts[1]
         else:
+            # Direct R2 key provided
             key = video_url
 
         # Determine file extension

@@ -118,6 +118,21 @@ export const processingWebhookClipSchema = z.object({
   })).default([]),
 });
 
+// Embedding schema for duplicate detection
+export const processingWebhookEmbeddingSchema = z.object({
+  clip_id: z.string().min(1),
+  embedding: z.array(z.number()),
+});
+
+// Group schema for duplicate detection
+export const processingWebhookGroupSchema = z.object({
+  group_id: z.string().uuid(),
+  group_type: z.enum(['duplicate', 'multiple_takes', 'same_topic']),
+  clip_ids: z.array(z.string().min(1)),
+  representative_clip_id: z.string().min(1),
+  similarity_scores: z.record(z.string(), z.number()),
+});
+
 export const processingWebhookSchema = z.object({
   source_id: z.string().uuid(),
   status: z.enum(['completed', 'failed']),
@@ -125,6 +140,8 @@ export const processingWebhookSchema = z.object({
   clips: z.array(processingWebhookClipSchema).optional().nullable(),
   duration_seconds: z.number().positive().optional().nullable(),
   source_thumbnail_url: z.string().url().optional().nullable(),
+  embeddings: z.array(processingWebhookEmbeddingSchema).optional().nullable(),
+  groups: z.array(processingWebhookGroupSchema).optional().nullable(),
 });
 
 // ============================================================================
@@ -188,6 +205,8 @@ export type AddTagsInput = z.infer<typeof addTagsSchema>;
 export type CloudflareWebhookPayload = z.infer<typeof cloudflareWebhookSchema>;
 export type ProcessingWebhookPayload = z.infer<typeof processingWebhookSchema>;
 export type ProcessingWebhookClip = z.infer<typeof processingWebhookClipSchema>;
+export type ProcessingWebhookEmbedding = z.infer<typeof processingWebhookEmbeddingSchema>;
+export type ProcessingWebhookGroup = z.infer<typeof processingWebhookGroupSchema>;
 export type SemanticSearchInput = z.infer<typeof semanticSearchSchema>;
 export type ChatMessageInput = z.infer<typeof chatMessageSchema>;
 export type CreateChatInput = z.infer<typeof createChatSchema>;

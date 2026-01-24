@@ -27,14 +27,14 @@ function sleep(ms: number): Promise<void> {
  */
 export class VideoProcessor extends DurableObject<ExtendedEnv> {
   private async waitForContainerReady(port: { fetch: (input: Request | string, init?: RequestInit) => Promise<Response> }): Promise<boolean> {
-    const maxChecks = 15;  // Increased from 10
-    const delayMs = 2000;  // Increased from 1000ms
+    const maxChecks = 20;  // More checks but faster intervals
+    const delayMs = 1000;  // 1 second between checks (faster startup)
 
     for (let attempt = 1; attempt <= maxChecks; attempt++) {
       try {
         const response = await port.fetch('http://container/ready');
         if (response.ok) {
-          console.log(`Container ready after ${attempt} checks`);
+          console.log(`Container ready after ${attempt} checks (~${attempt}s)`);
           return true;
         }
         console.log(`Container readiness check ${attempt}/${maxChecks}: not ready yet (status ${response.status})`);
@@ -87,8 +87,8 @@ export class VideoProcessor extends DurableObject<ExtendedEnv> {
         });
         console.log('Container start() completed, running:', container.running);
 
-        // Give container more time to initialize (Python/FastAPI startup)
-        await sleep(5000);
+        // Give container time to initialize (Python/FastAPI startup)
+        await sleep(2000);  // Reduced from 5s to 2s for faster startup
       }
     } catch (error) {
       console.error('Container initialization error:', error);
@@ -205,6 +205,36 @@ interface TranscriptResult {
   duration: number;
 }
 
+// Interface for clip embedding
+interface ClipEmbedding {
+  clip_id: string;
+  embedding: number[];
+}
+
+// Interface for similarity pair
+interface SimilarityPair {
+  clip_id_1: string;
+  clip_id_2: string;
+  similarity: number;
+}
+
+// Similarity thresholds
+const DUPLICATE_THRESHOLD = 0.95;
+const MULTIPLE_TAKES_THRESHOLD = 0.85;
+const SAME_TOPIC_THRESHOLD = 0.75;
+
+// Group types
+type GroupType = 'duplicate' | 'multiple_takes' | 'same_topic';
+
+// Interface for clip group
+interface ClipGroup {
+  group_id: string;
+  group_type: GroupType;
+  clip_ids: string[];
+  representative_clip_id: string;
+  similarity_scores: Record<string, number>;
+}
+
 /**
  * Transcribe audio using OpenAI Whisper API.
  */
@@ -259,6 +289,240 @@ async function transcribeAudio(
     console.error('Transcription error:', error);
     return null;
   }
+}
+
+/**
+ * Generate embeddings for clip transcripts using OpenAI API.
+ * Uses text-embedding-3-small with 384 dimensions to match database schema.
+ */
+async function generateEmbeddings(
+  clips: Array<{ clip_id: string; transcript: string | null }>,
+  apiKey: string
+): Promise<ClipEmbedding[]> {
+  // Filter clips with transcripts
+  const clipsWithTranscripts = clips.filter(c => c.transcript && c.transcript.trim().length > 0);
+
+  if (clipsWithTranscripts.length === 0) {
+    console.log('No transcripts available for embedding generation');
+    return [];
+  }
+
+  console.log(`Generating embeddings for ${clipsWithTranscripts.length} clips`);
+
+  try {
+    const response = await fetch('https://api.openai.com/v1/embeddings', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'text-embedding-3-small',
+        input: clipsWithTranscripts.map(c => c.transcript),
+        dimensions: 384,  // Match database schema (384 dimensions)
+      }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('OpenAI embedding API error:', response.status, errorText);
+      return [];
+    }
+
+    const result = await response.json() as {
+      data: Array<{ embedding: number[]; index: number }>;
+    };
+
+    // Map embeddings back to clip IDs
+    const embeddings: ClipEmbedding[] = result.data.map(item => ({
+      clip_id: clipsWithTranscripts[item.index].clip_id,
+      embedding: item.embedding,
+    }));
+
+    console.log(`Generated ${embeddings.length} embeddings`);
+    return embeddings;
+  } catch (error) {
+    console.error('Embedding generation error:', error);
+    return [];
+  }
+}
+
+/**
+ * Compute cosine similarity between two embeddings.
+ */
+function cosineSimilarity(a: number[], b: number[]): number {
+  if (a.length !== b.length) return 0;
+
+  let dotProduct = 0;
+  let normA = 0;
+  let normB = 0;
+
+  for (let i = 0; i < a.length; i++) {
+    dotProduct += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+
+  const magnitude = Math.sqrt(normA) * Math.sqrt(normB);
+  return magnitude === 0 ? 0 : dotProduct / magnitude;
+}
+
+/**
+ * Find similar clip pairs based on embeddings.
+ */
+function findSimilarPairs(
+  embeddings: ClipEmbedding[],
+  minSimilarity: number = SAME_TOPIC_THRESHOLD
+): SimilarityPair[] {
+  const pairs: SimilarityPair[] = [];
+
+  for (let i = 0; i < embeddings.length; i++) {
+    for (let j = i + 1; j < embeddings.length; j++) {
+      const similarity = cosineSimilarity(
+        embeddings[i].embedding,
+        embeddings[j].embedding
+      );
+
+      if (similarity >= minSimilarity) {
+        pairs.push({
+          clip_id_1: embeddings[i].clip_id,
+          clip_id_2: embeddings[j].clip_id,
+          similarity,
+        });
+      }
+    }
+  }
+
+  return pairs;
+}
+
+/**
+ * Classify a similarity pair into a group type.
+ */
+function classifyPair(similarity: number): GroupType | null {
+  if (similarity >= DUPLICATE_THRESHOLD) return 'duplicate';
+  if (similarity >= MULTIPLE_TAKES_THRESHOLD) return 'multiple_takes';
+  if (similarity >= SAME_TOPIC_THRESHOLD) return 'same_topic';
+  return null;
+}
+
+/**
+ * Build groups from similar pairs using union-find algorithm.
+ */
+function buildGroups(pairs: SimilarityPair[]): ClipGroup[] {
+  // Group pairs by type
+  const typePairs: Record<GroupType, SimilarityPair[]> = {
+    duplicate: [],
+    multiple_takes: [],
+    same_topic: [],
+  };
+
+  for (const pair of pairs) {
+    const groupType = classifyPair(pair.similarity);
+    if (groupType) {
+      typePairs[groupType].push(pair);
+    }
+  }
+
+  const groups: ClipGroup[] = [];
+
+  for (const [groupType, typedPairs] of Object.entries(typePairs) as [GroupType, SimilarityPair[]][]) {
+    if (typedPairs.length === 0) continue;
+
+    // Build adjacency list
+    const adjacency = new Map<string, Set<string>>();
+    const similarities = new Map<string, number>();
+
+    for (const pair of typedPairs) {
+      if (!adjacency.has(pair.clip_id_1)) adjacency.set(pair.clip_id_1, new Set());
+      if (!adjacency.has(pair.clip_id_2)) adjacency.set(pair.clip_id_2, new Set());
+
+      adjacency.get(pair.clip_id_1)!.add(pair.clip_id_2);
+      adjacency.get(pair.clip_id_2)!.add(pair.clip_id_1);
+
+      const key = [pair.clip_id_1, pair.clip_id_2].sort().join('|');
+      similarities.set(key, pair.similarity);
+    }
+
+    // Find connected components using DFS
+    const visited = new Set<string>();
+    const components: string[][] = [];
+
+    function dfs(node: string, component: string[]) {
+      visited.add(node);
+      component.push(node);
+      for (const neighbor of adjacency.get(node) || []) {
+        if (!visited.has(neighbor)) {
+          dfs(neighbor, component);
+        }
+      }
+    }
+
+    for (const clipId of adjacency.keys()) {
+      if (!visited.has(clipId)) {
+        const component: string[] = [];
+        dfs(clipId, component);
+        if (component.length > 1) {
+          components.push(component);
+        }
+      }
+    }
+
+    // Create ClipGroup objects
+    for (const component of components) {
+      const representative = component[0];
+      const scores: Record<string, number> = {};
+
+      for (const clipId of component) {
+        if (clipId !== representative) {
+          const key = [representative, clipId].sort().join('|');
+          scores[clipId] = similarities.get(key) || 0;
+        }
+      }
+
+      groups.push({
+        group_id: crypto.randomUUID(),
+        group_type: groupType,
+        clip_ids: component,
+        representative_clip_id: representative,
+        similarity_scores: scores,
+      });
+    }
+  }
+
+  console.log(`Built ${groups.length} groups: ${
+    groups.filter(g => g.group_type === 'duplicate').length} duplicates, ${
+    groups.filter(g => g.group_type === 'multiple_takes').length} multiple takes, ${
+    groups.filter(g => g.group_type === 'same_topic').length} same topic`);
+
+  return groups;
+}
+
+/**
+ * Detect duplicates and similar clips.
+ */
+async function detectDuplicates(
+  clips: Array<{ clip_id: string; transcript: string | null }>,
+  apiKey: string
+): Promise<{ embeddings: ClipEmbedding[]; groups: ClipGroup[] }> {
+  console.log('Starting duplicate detection');
+
+  // Generate embeddings
+  const embeddings = await generateEmbeddings(clips, apiKey);
+
+  if (embeddings.length < 2) {
+    console.log('Not enough embeddings for duplicate detection');
+    return { embeddings, groups: [] };
+  }
+
+  // Find similar pairs
+  const pairs = findSimilarPairs(embeddings);
+  console.log(`Found ${pairs.length} similar pairs`);
+
+  // Build groups
+  const groups = buildGroups(pairs);
+
+  return { embeddings, groups };
 }
 
 /**
@@ -466,6 +730,26 @@ export default {
           console.log('Uploaded source thumbnail:', sourceThumbnailKey);
         }
 
+        // Step 3.6: Detect duplicates and similar clips
+        let embeddings: ClipEmbedding[] = [];
+        let groups: ClipGroup[] = [];
+
+        if (env.OPENAI_API_KEY && uploadedClips.length >= 2) {
+          console.log('Step 3.6: Detecting duplicates and similar clips');
+          const clipsForEmbedding = uploadedClips.map(clip => ({
+            clip_id: clip.file_key.split('/').pop()?.replace('.mp4', '') || '',
+            transcript: clip.transcript_segment,
+          }));
+
+          const duplicateResult = await detectDuplicates(clipsForEmbedding, env.OPENAI_API_KEY);
+          embeddings = duplicateResult.embeddings;
+          groups = duplicateResult.groups;
+        } else if (!env.OPENAI_API_KEY) {
+          console.warn('OPENAI_API_KEY not configured, skipping duplicate detection');
+        } else {
+          console.log('Not enough clips for duplicate detection');
+        }
+
         // Step 4: Call webhook with results
         console.log('Step 4: Calling webhook');
         const webhookPayload = {
@@ -474,6 +758,17 @@ export default {
           clips: uploadedClips,
           duration_seconds: containerResult.total_duration,
           source_thumbnail_url: sourceThumbnailUrl,
+          embeddings: embeddings.map(e => ({
+            clip_id: e.clip_id,
+            embedding: e.embedding,
+          })),
+          groups: groups.map(g => ({
+            group_id: g.group_id,
+            group_type: g.group_type,
+            clip_ids: g.clip_ids,
+            representative_clip_id: g.representative_clip_id,
+            similarity_scores: g.similarity_scores,
+          })),
         };
 
         const webhookSuccess = await callWebhook(webhook_url, webhookPayload, env.WEBHOOK_SECRET);

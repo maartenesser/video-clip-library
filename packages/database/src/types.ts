@@ -38,6 +38,7 @@ export interface Source {
   original_file_url: string;
   original_file_key: string;
   duration_seconds: number | null;
+  thumbnail_url: string | null;
   status: string;
   error_message: string | null;
   created_at: string;
@@ -166,6 +167,7 @@ export interface SourceInsert {
   original_file_url: string;
   original_file_key: string;
   duration_seconds?: number | null;
+  thumbnail_url?: string | null;
   status?: string;
   error_message?: string | null;
   created_at?: string;
@@ -293,6 +295,7 @@ export interface SourceUpdate {
   original_file_url?: string;
   original_file_key?: string;
   duration_seconds?: number | null;
+  thumbnail_url?: string | null;
   status?: string;
   error_message?: string | null;
   created_at?: string;

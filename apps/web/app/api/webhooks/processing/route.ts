@@ -79,7 +79,7 @@ export async function POST(request: NextRequest) {
       throw parseError;
     }
 
-    const { source_id, status, error_message, clips, duration_seconds, source_thumbnail_url } = parsedPayload;
+    const { source_id, status, error_message, clips, duration_seconds, source_thumbnail_url, embeddings, groups } = parsedPayload;
 
     const db = getDatabase();
 
@@ -105,6 +105,9 @@ export async function POST(request: NextRequest) {
     const allTags = await db.getTags();
     const tagMap = new Map(allTags.map(t => [t.name.toLowerCase(), t.id]));
 
+    // Map from webhook clip_id to database clip ID
+    const clipIdMap = new Map<string, string>();
+
     // Create clips and their tags
     if (clips && clips.length > 0) {
       for (const clipData of clips) {
@@ -119,6 +122,11 @@ export async function POST(request: NextRequest) {
           transcript_segment: clipData.transcript_segment || null,
           detection_method: clipData.detection_method,
         });
+
+        // Store mapping from webhook clip_id to database clip ID
+        // The webhook uses clip_id format like "source_id_clip_0000"
+        const webhookClipId = clipData.file_key.split('/').pop()?.replace('.mp4', '') || '';
+        clipIdMap.set(webhookClipId, clip.id);
 
         // Add tags to the clip
         if (clipData.tags && clipData.tags.length > 0) {
@@ -135,6 +143,73 @@ export async function POST(request: NextRequest) {
               console.warn(`Unknown tag: ${tagData.name}`);
             }
           }
+        }
+      }
+    }
+
+    // Save embeddings for clips
+    if (embeddings && embeddings.length > 0) {
+      console.log(`Saving ${embeddings.length} embeddings`);
+      for (const embedding of embeddings) {
+        const dbClipId = clipIdMap.get(embedding.clip_id);
+        if (dbClipId) {
+          try {
+            await db.upsertClipEmbedding({
+              clip_id: dbClipId,
+              embedding: embedding.embedding,
+              model_name: 'text-embedding-3-small',
+            });
+          } catch (embError) {
+            console.error(`Failed to save embedding for clip ${dbClipId}:`, embError);
+          }
+        } else {
+          console.warn(`No database clip ID found for webhook clip_id: ${embedding.clip_id}`);
+        }
+      }
+    }
+
+    // Save groups and group members
+    if (groups && groups.length > 0) {
+      console.log(`Saving ${groups.length} groups`);
+      for (const group of groups) {
+        try {
+          // Map webhook clip IDs to database clip IDs
+          const dbClipIds = group.clip_ids
+            .map(cid => clipIdMap.get(cid))
+            .filter((id): id is string => id !== undefined);
+
+          if (dbClipIds.length < 2) {
+            console.warn(`Group ${group.group_id} has fewer than 2 valid clips, skipping`);
+            continue;
+          }
+
+          const representativeDbClipId = clipIdMap.get(group.representative_clip_id);
+
+          // Create the group
+          const dbGroup = await db.createClipGroup({
+            id: group.group_id,
+            name: `${group.group_type} group`,
+            group_type: group.group_type,
+            source_id,
+            representative_clip_id: representativeDbClipId || dbClipIds[0],
+          });
+
+          // Add clips to the group with similarity scores
+          for (const dbClipId of dbClipIds) {
+            const webhookClipId = Array.from(clipIdMap.entries())
+              .find(([, v]) => v === dbClipId)?.[0] || '';
+            const similarityScore = group.similarity_scores[webhookClipId] || null;
+            const isRepresentative = dbClipId === (representativeDbClipId || dbClipIds[0]);
+
+            await db.addClipToGroup({
+              clip_id: dbClipId,
+              group_id: dbGroup.id,
+              similarity_score: similarityScore,
+              is_representative: isRepresentative,
+            });
+          }
+        } catch (groupError) {
+          console.error(`Failed to save group ${group.group_id}:`, groupError);
         }
       }
     }
@@ -158,6 +233,8 @@ export async function POST(request: NextRequest) {
       success: true,
       status: 'completed',
       clips_created: clips?.length || 0,
+      embeddings_saved: embeddings?.length || 0,
+      groups_saved: groups?.length || 0,
     });
   } catch (error) {
     console.error('Webhook processing error:', error);

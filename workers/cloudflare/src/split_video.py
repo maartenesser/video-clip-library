@@ -30,6 +30,7 @@ class VideoSplitter:
         video_bitrate: str = "2M",
         audio_bitrate: str = "128k",
         thumbnail_time_offset: float = 0.5,
+        fast_mode: bool = True,  # Use stream copy for faster processing
     ):
         """Initialize the video splitter.
 
@@ -40,6 +41,7 @@ class VideoSplitter:
             video_bitrate: Video bitrate (e.g., "2M")
             audio_bitrate: Audio bitrate (e.g., "128k")
             thumbnail_time_offset: Time offset in seconds for thumbnail
+            fast_mode: Use stream copy instead of re-encoding (10-100x faster)
         """
         self.output_format = output_format
         self.video_codec = video_codec
@@ -47,6 +49,7 @@ class VideoSplitter:
         self.video_bitrate = video_bitrate
         self.audio_bitrate = audio_bitrate
         self.thumbnail_time_offset = thumbnail_time_offset
+        self.fast_mode = fast_mode
 
     async def _run_ffmpeg(self, cmd: list[str], timeout: int = 120) -> None:
         """Run FFmpeg command asynchronously.
@@ -97,31 +100,51 @@ class VideoSplitter:
         # Ensure output directory exists
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
-        # FFmpeg command for extracting clip
-        # Using -ss before -i for faster seeking
-        cmd = [
-            "ffmpeg",
-            "-ss",
-            str(start_time),
-            "-i",
-            video_path,
-            "-t",
-            str(duration),
-            "-c:v",
-            self.video_codec,
-            "-c:a",
-            self.audio_codec,
-            "-b:v",
-            self.video_bitrate,
-            "-b:a",
-            self.audio_bitrate,
-            "-preset",
-            "fast",
-            "-movflags",
-            "+faststart",  # Enable streaming
-            "-y",
-            output_path,
-        ]
+        if self.fast_mode:
+            # FAST MODE: Use stream copy (no re-encoding) - 10-100x faster
+            # Note: Cuts may not be frame-accurate (keyframe aligned)
+            cmd = [
+                "ffmpeg",
+                "-ss",
+                str(start_time),
+                "-i",
+                video_path,
+                "-t",
+                str(duration),
+                "-c",
+                "copy",  # Copy both video and audio streams without re-encoding
+                "-avoid_negative_ts",
+                "make_zero",  # Fix timestamp issues
+                "-movflags",
+                "+faststart",  # Enable streaming
+                "-y",
+                output_path,
+            ]
+        else:
+            # QUALITY MODE: Re-encode video (slower but frame-accurate)
+            cmd = [
+                "ffmpeg",
+                "-ss",
+                str(start_time),
+                "-i",
+                video_path,
+                "-t",
+                str(duration),
+                "-c:v",
+                self.video_codec,
+                "-c:a",
+                self.audio_codec,
+                "-b:v",
+                self.video_bitrate,
+                "-b:a",
+                self.audio_bitrate,
+                "-preset",
+                "fast",
+                "-movflags",
+                "+faststart",  # Enable streaming
+                "-y",
+                output_path,
+            ]
 
         logger.debug(
             "Extracting clip",
@@ -129,6 +152,7 @@ class VideoSplitter:
             end=end_time,
             duration=duration,
             output=output_path,
+            fast_mode=self.fast_mode,
         )
 
         await self._run_ffmpeg(cmd)
