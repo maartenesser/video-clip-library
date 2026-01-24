@@ -26,22 +26,29 @@ function sleep(ms: number): Promise<void> {
  * Each instance manages a single container.
  */
 export class VideoProcessor extends DurableObject<ExtendedEnv> {
-  private async waitForContainerReady(port: { fetch: (input: Request | string, init?: RequestInit) => Promise<Response> }): Promise<void> {
-    const maxChecks = 10;
-    const delayMs = 1000;
+  private async waitForContainerReady(port: { fetch: (input: Request | string, init?: RequestInit) => Promise<Response> }): Promise<boolean> {
+    const maxChecks = 15;  // Increased from 10
+    const delayMs = 2000;  // Increased from 1000ms
 
     for (let attempt = 1; attempt <= maxChecks; attempt++) {
       try {
         const response = await port.fetch('http://container/ready');
         if (response.ok) {
-          return;
+          console.log(`Container ready after ${attempt} checks`);
+          return true;
         }
+        console.log(`Container readiness check ${attempt}/${maxChecks}: not ready yet (status ${response.status})`);
       } catch (error) {
-        console.error(`Container readiness check ${attempt}/${maxChecks} failed:`, error);
+        console.log(`Container readiness check ${attempt}/${maxChecks} failed:`, error instanceof Error ? error.message : error);
       }
 
-      await sleep(delayMs);
+      if (attempt < maxChecks) {
+        await sleep(delayMs);
+      }
     }
+
+    console.error('Container failed to become ready after all checks');
+    return false;
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -80,8 +87,8 @@ export class VideoProcessor extends DurableObject<ExtendedEnv> {
         });
         console.log('Container start() completed, running:', container.running);
 
-        // Give container time to initialize
-        await sleep(3000);
+        // Give container more time to initialize (Python/FastAPI startup)
+        await sleep(5000);
       }
     } catch (error) {
       console.error('Container initialization error:', error);
@@ -102,7 +109,16 @@ export class VideoProcessor extends DurableObject<ExtendedEnv> {
     const container = this.ctx.container;
     const port = container.getTcpPort(8080);
 
-    await this.waitForContainerReady(port);
+    const isReady = await this.waitForContainerReady(port);
+    if (!isReady) {
+      return new Response(JSON.stringify({
+        error: 'Container failed to become ready',
+        details: 'Container did not respond to readiness checks after multiple attempts'
+      }), {
+        status: 503,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
 
     const requestBody = request.body ? await request.arrayBuffer() : null;
 
@@ -171,7 +187,99 @@ interface ContainerResponse {
   processing_time_seconds: number;
   total_clips: number;
   clips: ContainerClip[];
+  audio_base64?: string;  // Audio for transcription
   error?: string;
+}
+
+// Interface for transcript segment from OpenAI Whisper
+interface TranscriptSegment {
+  text: string;
+  start: number;
+  end: number;
+}
+
+// Interface for transcription result
+interface TranscriptResult {
+  text: string;
+  segments: TranscriptSegment[];
+  duration: number;
+}
+
+/**
+ * Transcribe audio using OpenAI Whisper API.
+ */
+async function transcribeAudio(
+  audioBase64: string,
+  apiKey: string
+): Promise<TranscriptResult | null> {
+  try {
+    console.log('Starting transcription with OpenAI Whisper');
+
+    // Decode base64 to binary
+    const audioData = Uint8Array.from(atob(audioBase64), c => c.charCodeAt(0));
+    console.log('Audio size for transcription:', audioData.byteLength);
+
+    // Create form data
+    const formData = new FormData();
+    const audioBlob = new Blob([audioData], { type: 'audio/mp3' });
+    formData.append('file', audioBlob, 'audio.mp3');
+    formData.append('model', 'whisper-1');
+    formData.append('response_format', 'verbose_json');
+    formData.append('timestamp_granularities[]', 'segment');
+
+    // Call OpenAI API
+    const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+      },
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('OpenAI transcription failed:', response.status, errorText);
+      return null;
+    }
+
+    const result = await response.json() as {
+      text: string;
+      segments?: Array<{ text: string; start: number; end: number }>;
+      duration?: number;
+    };
+
+    console.log('Transcription completed, segments:', result.segments?.length || 0);
+
+    return {
+      text: result.text,
+      segments: result.segments || [],
+      duration: result.duration || 0,
+    };
+  } catch (error) {
+    console.error('Transcription error:', error);
+    return null;
+  }
+}
+
+/**
+ * Get transcript text for a specific time range.
+ */
+function getTranscriptForClip(
+  segments: TranscriptSegment[],
+  startTime: number,
+  endTime: number
+): string | null {
+  // Find segments that overlap with the clip time range
+  const overlappingSegments = segments.filter(seg =>
+    seg.end > startTime && seg.start < endTime
+  );
+
+  if (overlappingSegments.length === 0) return null;
+
+  return overlappingSegments
+    .map(seg => seg.text.trim())
+    .join(' ')
+    .trim() || null;
 }
 
 /**
@@ -219,6 +327,10 @@ export default {
         const max_clip_duration = body.max_clip_duration ?? 20.0;
         const min_scene_length = body.min_scene_length ?? 1.5;
 
+        // Extract base URL from webhook URL to construct media URLs
+        const webhookParsed = new URL(webhook_url);
+        const appBaseUrl = `${webhookParsed.protocol}//${webhookParsed.host}`;
+
         // Step 1: Download video from R2 using binding
         console.log('Step 1: Downloading video from R2:', video_url);
         const r2Object = await env.VIDEO_BUCKET.get(video_url);
@@ -239,7 +351,7 @@ export default {
 
         // Step 2: Send video to container for processing
         console.log('Step 2: Sending video to container for local processing');
-        const instanceId = 'default-v7';
+        const instanceId = 'default-v8';
         const id = env.VIDEO_PROCESSOR.idFromName(instanceId);
         const stub = env.VIDEO_PROCESSOR.get(id);
 
@@ -278,6 +390,23 @@ export default {
         const containerResult = await containerResponse.json() as ContainerResponse;
         console.log('Container processing complete, clips:', containerResult.total_clips);
 
+        // Step 2.5: Transcribe audio if available
+        let transcriptSegments: TranscriptSegment[] = [];
+        if (containerResult.audio_base64 && env.OPENAI_API_KEY) {
+          console.log('Step 2.5: Transcribing audio with OpenAI Whisper');
+          const transcript = await transcribeAudio(containerResult.audio_base64, env.OPENAI_API_KEY);
+          if (transcript) {
+            transcriptSegments = transcript.segments;
+            console.log('Transcription completed, segments:', transcriptSegments.length);
+          } else {
+            console.warn('Transcription failed or returned no results');
+          }
+        } else if (!containerResult.audio_base64) {
+          console.warn('No audio data from container for transcription');
+        } else if (!env.OPENAI_API_KEY) {
+          console.warn('OPENAI_API_KEY not configured, skipping transcription');
+        }
+
         // Step 3: Upload clips to R2
         console.log('Step 3: Uploading clips to R2');
         const uploadedClips = [];
@@ -299,22 +428,43 @@ export default {
             await env.VIDEO_BUCKET.put(thumbnailKey, thumbnailData, {
               httpMetadata: { contentType: 'image/jpeg' },
             });
-            thumbnailUrl = `https://${env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com/video-clips/${thumbnailKey}`;
+            // Construct thumbnail URL using app's media proxy
+            thumbnailUrl = `${appBaseUrl}/api/media/${thumbnailKey}`;
           }
+
+          // Get transcript for this clip's time range
+          const clipTranscript = getTranscriptForClip(
+            transcriptSegments,
+            clip.start_time,
+            clip.end_time
+          );
 
           uploadedClips.push({
             start_time_seconds: clip.start_time,
             end_time_seconds: clip.end_time,
-            file_url: `https://${env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com/video-clips/${videoKey}`,
+            // Use app's media proxy for serving videos
+            file_url: `${appBaseUrl}/api/media/${videoKey}`,
             file_key: videoKey,
             thumbnail_url: thumbnailUrl,
-            transcript_segment: null, // Transcription not done in container
-            detection_method: 'scene-detection',
+            transcript_segment: clipTranscript,
+            detection_method: transcriptSegments.length > 0 ? 'hybrid' : 'scene',
             tags: [], // Tagging not done in container
           });
         }
 
         console.log('Uploaded clips to R2:', uploadedClips.length);
+
+        // Step 3.5: Generate source thumbnail from first clip's thumbnail
+        let sourceThumbnailUrl = null;
+        if (containerResult.clips.length > 0 && containerResult.clips[0].thumbnail_base64) {
+          const sourceThumbnailKey = video_url.replace(/\.[^.]+$/, '_thumb.jpg');
+          const thumbnailData = Uint8Array.from(atob(containerResult.clips[0].thumbnail_base64), c => c.charCodeAt(0));
+          await env.VIDEO_BUCKET.put(sourceThumbnailKey, thumbnailData, {
+            httpMetadata: { contentType: 'image/jpeg' },
+          });
+          sourceThumbnailUrl = `${appBaseUrl}/api/media/${sourceThumbnailKey}`;
+          console.log('Uploaded source thumbnail:', sourceThumbnailKey);
+        }
 
         // Step 4: Call webhook with results
         console.log('Step 4: Calling webhook');
@@ -323,6 +473,7 @@ export default {
           status: 'completed',
           clips: uploadedClips,
           duration_seconds: containerResult.total_duration,
+          source_thumbnail_url: sourceThumbnailUrl,
         };
 
         const webhookSuccess = await callWebhook(webhook_url, webhookPayload, env.WEBHOOK_SECRET);
@@ -358,7 +509,7 @@ export default {
         url.pathname.startsWith('/process-local')) {
 
       // Use a single instance for now to simplify debugging
-      const instanceId = 'default-v7';
+      const instanceId = 'default-v8';
       const hasBody = request.method !== 'GET' && request.method !== 'HEAD' && request.body;
       const requestBody = hasBody ? await request.arrayBuffer() : null;
 
@@ -407,6 +558,9 @@ async function callWebhook(
       'Content-Type': 'application/json',
     };
 
+    console.log('Calling webhook:', webhookUrl);
+    console.log('Secret configured:', !!secret, 'length:', secret?.length || 0);
+
     if (secret) {
       // Create HMAC signature
       const encoder = new TextEncoder();
@@ -426,6 +580,9 @@ async function callWebhook(
         .map(b => b.toString(16).padStart(2, '0'))
         .join('');
       headers['x-webhook-signature'] = signatureHex;
+      console.log('Signature added, first 10 chars:', signatureHex.substring(0, 10));
+    } else {
+      console.warn('No webhook secret configured - sending without signature');
     }
 
     const response = await fetch(webhookUrl, {
@@ -435,6 +592,10 @@ async function callWebhook(
     });
 
     console.log('Webhook response status:', response.status);
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('Webhook error response:', errorText);
+    }
     return response.ok;
   } catch (error) {
     console.error('Webhook call failed:', error);

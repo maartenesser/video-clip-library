@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { Readable } from 'stream';
 import { getStorage } from '@/lib/storage';
 
 /**
@@ -6,6 +7,7 @@ import { getStorage } from '@/lib/storage';
  *
  * Proxy endpoint for serving media files from R2.
  * Streams video files and images directly from R2 storage.
+ * Supports HTTP Range requests for video seeking.
  *
  * Example: /api/media/clips/abc123/clip_0001.mp4
  */
@@ -33,9 +35,13 @@ export async function GET(
     // Import the command dynamically to avoid issues with edge runtime
     const { GetObjectCommand } = await import('@aws-sdk/client-s3');
 
+    // Get Range header from request for partial content support
+    const rangeHeader = request.headers.get('range');
+
     const command = new GetObjectCommand({
       Bucket: bucketName,
       Key: key,
+      Range: rangeHeader || undefined,
     });
 
     const response = await s3Client.send(command);
@@ -47,18 +53,33 @@ export async function GET(
     // Get content type from the response or infer from extension
     const contentType = response.ContentType || getContentType(key);
 
-    // Get the body as a stream
-    const stream = response.Body as ReadableStream;
+    // Convert AWS SDK stream to web-standard ReadableStream
+    const stream = toWebStream(response.Body as Readable | ReadableStream);
 
-    // Return the stream with appropriate headers
-    return new NextResponse(stream as any, {
+    // Build response headers
+    const headers: HeadersInit = {
+      'Content-Type': contentType,
+      'Cache-Control': 'public, max-age=31536000, immutable',
+      'Accept-Ranges': 'bytes',
+    };
+
+    // Handle partial content (Range request)
+    if (response.ContentRange) {
+      headers['Content-Range'] = response.ContentRange;
+      headers['Content-Length'] = response.ContentLength?.toString() || '';
+
+      return new NextResponse(stream, {
+        status: 206,
+        headers,
+      });
+    }
+
+    // Full content response
+    headers['Content-Length'] = response.ContentLength?.toString() || '';
+
+    return new NextResponse(stream, {
       status: 200,
-      headers: {
-        'Content-Type': contentType,
-        'Content-Length': response.ContentLength?.toString() || '',
-        'Cache-Control': 'public, max-age=31536000, immutable',
-        'Accept-Ranges': 'bytes',
-      },
+      headers,
     });
   } catch (error) {
     console.error('Media proxy error:', error);
@@ -68,11 +89,33 @@ export async function GET(
       return NextResponse.json({ error: 'File not found' }, { status: 404 });
     }
 
+    // Handle invalid Range requests
+    if (error instanceof Error && error.name === 'InvalidRange') {
+      return new NextResponse(null, { status: 416 }); // Range Not Satisfiable
+    }
+
     return NextResponse.json(
       { error: 'Failed to fetch media' },
       { status: 500 }
     );
   }
+}
+
+/**
+ * Convert AWS SDK stream body to web-standard ReadableStream
+ */
+function toWebStream(body: Readable | ReadableStream): ReadableStream {
+  // If already a web ReadableStream, return it
+  if (body instanceof ReadableStream) {
+    return body;
+  }
+
+  // Node.js Readable stream - convert to web stream
+  if (typeof (body as Readable).pipe === 'function') {
+    return Readable.toWeb(body as Readable) as ReadableStream;
+  }
+
+  throw new Error('Unsupported body type');
 }
 
 function getContentType(path: string): string {

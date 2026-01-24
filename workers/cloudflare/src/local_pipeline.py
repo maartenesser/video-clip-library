@@ -41,6 +41,7 @@ class LocalProcessingResult:
     total_duration: float
     clips: list[LocalClipResult]
     processing_time_seconds: float
+    audio_data: Optional[bytes] = None  # Audio bytes for transcription by Worker
     error: Optional[str] = None
 
 
@@ -50,6 +51,64 @@ class LocalVideoPipeline:
     def __init__(self):
         self.scene_detector = SceneDetector()
         self.video_splitter = VideoSplitter()
+
+    async def extract_audio(self, video_path: str, temp_dir: str) -> Optional[bytes]:
+        """Extract audio from video for transcription.
+
+        Args:
+            video_path: Path to the video file
+            temp_dir: Temporary directory for audio file
+
+        Returns:
+            Audio bytes as MP3 or None if extraction fails
+        """
+        import subprocess
+
+        audio_path = str(Path(temp_dir) / "audio.mp3")
+
+        try:
+            # FFmpeg command to extract audio optimized for Whisper
+            cmd = [
+                "ffmpeg",
+                "-i", video_path,
+                "-vn",  # No video
+                "-acodec", "libmp3lame",  # MP3 codec
+                "-ar", "16000",  # 16kHz sample rate (optimal for Whisper)
+                "-ac", "1",  # Mono
+                "-b:a", "64k",  # 64kbps bitrate (reduces file size)
+                "-y",  # Overwrite output
+                audio_path,
+            ]
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=300,  # 5 minute timeout
+            )
+
+            if result.returncode != 0:
+                logger.warning("FFmpeg audio extraction failed", error=result.stderr)
+                return None
+
+            # Read audio file bytes
+            with open(audio_path, "rb") as f:
+                audio_data = f.read()
+
+            # Check file size - Whisper has 25MB limit
+            size_mb = len(audio_data) / (1024 * 1024)
+            if size_mb > 25:
+                logger.warning("Audio file exceeds Whisper 25MB limit", size_mb=size_mb)
+
+            logger.info("Audio extracted successfully", size_mb=round(size_mb, 2))
+            return audio_data
+
+        except subprocess.TimeoutExpired:
+            logger.warning("Audio extraction timed out")
+            return None
+        except Exception as e:
+            logger.warning("Audio extraction error", error=str(e))
+            return None
 
     async def process_video_bytes(
         self,
@@ -145,6 +204,10 @@ class LocalVideoPipeline:
                     clip_count=len(clip_results),
                 )
 
+                # Extract audio for transcription (Worker will call OpenAI)
+                logger.info("Extracting audio for transcription", job_id=job_id)
+                audio_data = await self.extract_audio(video_path, temp_dir)
+
                 # Read clip files and encode as base64
                 local_clips = []
                 for clip in clip_results:
@@ -174,6 +237,7 @@ class LocalVideoPipeline:
                     job_id=job_id,
                     total_clips=len(local_clips),
                     processing_time=processing_time,
+                    has_audio=audio_data is not None,
                 )
 
                 return LocalProcessingResult(
@@ -181,6 +245,7 @@ class LocalVideoPipeline:
                     total_duration=scene_result.video_duration,
                     clips=local_clips,
                     processing_time_seconds=processing_time,
+                    audio_data=audio_data,
                 )
 
         except Exception as e:

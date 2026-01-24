@@ -5,11 +5,12 @@ compatibility_date = "2024-01-01"
 compatibility_flags = ["nodejs_compat"]
 
 # Container configuration (using Durable Objects)
+# Using performance instance for larger video processing (400MB+)
 [[containers]]
 class_name = "VideoProcessor"
 image = "./Dockerfile"
 max_instances = 5
-instance_type = "basic"
+instance_type = "performance"
 
 # Durable Objects binding for the container
 [[durable_objects.bindings]]

@@ -10,12 +10,18 @@ const WEBHOOK_SECRET = process.env.CLOUDFLARE_WEBHOOK_SECRET;
 function addThumbnailUrls(sources: any[]) {
   const baseUrl = process.env.NEXT_PUBLIC_APP_URL || '';
   return sources.map((source) => {
-    let thumbnailUrl = null;
-    if (source.original_file_key) {
-      // Construct thumbnail URL from the source file key
+    let thumbnailUrl = source.thumbnail_url || null;
+
+    // If thumbnail_url is stored in the database, use it via proxy
+    if (source.thumbnail_key) {
+      thumbnailUrl = `${baseUrl}/api/media/${source.thumbnail_key}`;
+    } else if (source.original_file_key) {
+      // Fallback: construct thumbnail URL from the source file key
+      // This assumes source thumbnail was generated during processing
       const thumbKey = source.original_file_key.replace(/\.[^.]+$/, '_thumb.jpg');
       thumbnailUrl = `${baseUrl}/api/media/${thumbKey}`;
     }
+
     return {
       ...source,
       thumbnail_url: thumbnailUrl,

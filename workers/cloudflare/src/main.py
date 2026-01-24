@@ -354,12 +354,18 @@ async def process_video_local(request: Request):
                 "thumbnail_base64": base64.b64encode(clip.thumbnail_data).decode("utf-8") if clip.thumbnail_data else None,
             })
 
+        # Encode audio for transcription by Worker
+        audio_base64 = None
+        if result.audio_data:
+            audio_base64 = base64.b64encode(result.audio_data).decode("utf-8")
+
         return {
             "job_id": result.job_id,
             "total_duration": result.total_duration,
             "processing_time_seconds": result.processing_time_seconds,
             "total_clips": len(clips_data),
             "clips": clips_data,
+            "audio_base64": audio_base64,
         }
 
     except Exception as e:

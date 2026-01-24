@@ -50,12 +50,13 @@ export async function GET(
       // Generate proxy URL for video file
       if (clip.file_key) {
         proxyFileUrl = `${baseUrl}/api/media/${clip.file_key}`;
-      }
 
-      // Generate proxy URL for thumbnail
-      if (clip.file_key) {
-        const thumbnailKey = clip.file_key.replace('.mp4', '_thumb.jpg');
-        proxyThumbnailUrl = `${baseUrl}/api/media/${thumbnailKey}`;
+        // Generate proxy URL for thumbnail - only if not already set
+        // Use regex to properly replace only the file extension
+        if (!proxyThumbnailUrl || !proxyThumbnailUrl.includes('/api/media/')) {
+          const thumbnailKey = clip.file_key.replace(/\.mp4$/i, '_thumb.jpg');
+          proxyThumbnailUrl = `${baseUrl}/api/media/${thumbnailKey}`;
+        }
       }
 
       return {

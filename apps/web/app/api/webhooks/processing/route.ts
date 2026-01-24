@@ -79,7 +79,7 @@ export async function POST(request: NextRequest) {
       throw parseError;
     }
 
-    const { source_id, status, error_message, clips, duration_seconds } = parsedPayload;
+    const { source_id, status, error_message, clips, duration_seconds, source_thumbnail_url } = parsedPayload;
 
     const db = getDatabase();
 
@@ -139,10 +139,11 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Update source status to completed
+    // Update source status to completed with thumbnail
     await db.updateSource(source_id, {
       status: 'completed',
       duration_seconds: duration_seconds || null,
+      thumbnail_url: source_thumbnail_url || null,
     });
 
     // Complete processing jobs

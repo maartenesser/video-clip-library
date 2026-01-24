@@ -124,6 +124,7 @@ export const processingWebhookSchema = z.object({
   error_message: z.string().max(5000).optional().nullable(),
   clips: z.array(processingWebhookClipSchema).optional().nullable(),
   duration_seconds: z.number().positive().optional().nullable(),
+  source_thumbnail_url: z.string().url().optional().nullable(),
 });
 
 // ============================================================================
