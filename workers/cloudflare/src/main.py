@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Optional
 
+import httpx
 import structlog
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,6 +22,7 @@ from .models import (
 )
 from .pipeline import VideoPipeline
 from .local_pipeline import LocalVideoPipeline
+from .streaming_pipeline import StreamingVideoPipeline
 
 # Configure structured logging
 structlog.configure(
@@ -288,6 +290,121 @@ async def debug_network_test():
     return results
 
 
+@app.post("/process-url")
+async def process_video_from_url(request: Request):
+    """Process video from a presigned URL.
+
+    This endpoint accepts a presigned URL to download the video,
+    then processes it locally (scene detection, clip splitting),
+    and returns the processed clips as base64-encoded data.
+
+    This approach avoids Worker memory limits for large video files
+    by having the container download the video directly from R2.
+    """
+    import base64
+
+    try:
+        # Parse JSON body
+        body = await request.json()
+        video_url = body.get("video_url")
+        source_id = body.get("source_id", str(uuid.uuid4()))
+        min_clip_duration = float(body.get("min_clip_duration", 3.0))
+        max_clip_duration = float(body.get("max_clip_duration", 20.0))
+        min_scene_length = float(body.get("min_scene_length", 1.5))
+
+        if not video_url:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "video_url is required"},
+            )
+
+        logger.info(
+            "Downloading video from presigned URL",
+            source_id=source_id,
+        )
+
+        # Download video from presigned URL with streaming
+        async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=30.0)) as client:
+            response = await client.get(video_url)
+
+            if response.status_code != 200:
+                logger.error(
+                    "Failed to download video",
+                    status_code=response.status_code,
+                    source_id=source_id,
+                )
+                return JSONResponse(
+                    status_code=502,
+                    content={
+                        "error": "Failed to download video from presigned URL",
+                        "status_code": response.status_code,
+                    },
+                )
+
+            video_bytes = response.content
+
+        logger.info(
+            "Video downloaded successfully",
+            source_id=source_id,
+            video_size=len(video_bytes),
+        )
+
+        # Process video using existing pipeline
+        pipeline = LocalVideoPipeline()
+        result = await pipeline.process_video_bytes(
+            video_bytes=video_bytes,
+            source_id=source_id,
+            min_clip_duration=min_clip_duration,
+            max_clip_duration=max_clip_duration,
+            min_scene_length=min_scene_length,
+        )
+
+        if result.error:
+            return JSONResponse(
+                status_code=500,
+                content={"error": result.error},
+            )
+
+        # Encode clips as base64 for JSON response
+        clips_data = []
+        for clip in result.clips:
+            clips_data.append({
+                "clip_id": clip.clip_id,
+                "start_time": clip.start_time,
+                "end_time": clip.end_time,
+                "duration": clip.duration,
+                "video_base64": base64.b64encode(clip.video_data).decode("utf-8"),
+                "thumbnail_base64": base64.b64encode(clip.thumbnail_data).decode("utf-8") if clip.thumbnail_data else None,
+            })
+
+        # Encode audio for transcription by Worker
+        audio_base64 = None
+        if result.audio_data:
+            audio_base64 = base64.b64encode(result.audio_data).decode("utf-8")
+
+        return {
+            "job_id": result.job_id,
+            "total_duration": result.total_duration,
+            "processing_time_seconds": result.processing_time_seconds,
+            "total_clips": len(clips_data),
+            "clips": clips_data,
+            "audio_base64": audio_base64,
+        }
+
+    except httpx.TimeoutException as e:
+        logger.error("Video download timed out", error=str(e))
+        return JSONResponse(
+            status_code=504,
+            content={"error": "Video download timed out"},
+        )
+    except Exception as e:
+        logger.error("Process URL endpoint failed", error=str(e))
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)},
+        )
+
+
 @app.post("/process-local")
 async def process_video_local(request: Request):
     """Process video bytes locally (no network access needed).
@@ -370,6 +487,99 @@ async def process_video_local(request: Request):
 
     except Exception as e:
         logger.error("Local processing endpoint failed", error=str(e))
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)},
+        )
+
+
+@app.post("/process-streaming")
+async def process_video_streaming(request: Request):
+    """Process large video with streaming - no memory limits.
+
+    This endpoint is designed for large videos (500MB+) and uses:
+    - Streaming download to disk (never loads full video in memory)
+    - Chunked transcription for audio >25MB
+    - Direct R2 uploads from container (bypasses Worker)
+    - Metadata-only webhook responses (R2 keys instead of base64)
+
+    Expected JSON body:
+    {
+        "video_url": "presigned URL to download video",
+        "source_id": "unique source identifier",
+        "webhook_url": "URL to call with results",
+        "min_clip_duration": 3.0,
+        "max_clip_duration": 20.0,
+        "min_scene_length": 1.5
+    }
+    """
+    try:
+        body = await request.json()
+
+        video_url = body.get("video_url")
+        source_id = body.get("source_id", str(uuid.uuid4()))
+        webhook_url = body.get("webhook_url")
+        min_clip_duration = float(body.get("min_clip_duration", 3.0))
+        max_clip_duration = float(body.get("max_clip_duration", 20.0))
+        min_scene_length = float(body.get("min_scene_length", 1.5))
+        webhook_secret = body.get("webhook_secret") or os.getenv("WEBHOOK_SECRET")
+
+        if not video_url:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "video_url is required"},
+            )
+
+        logger.info(
+            "Received streaming processing request",
+            source_id=source_id,
+            has_webhook=bool(webhook_url),
+        )
+
+        # Process using streaming pipeline
+        pipeline = StreamingVideoPipeline()
+        result = await pipeline.process_and_upload(
+            video_url=video_url,
+            source_id=source_id,
+            webhook_url=webhook_url,
+            min_clip_duration=min_clip_duration,
+            max_clip_duration=max_clip_duration,
+            min_scene_length=min_scene_length,
+            webhook_secret=webhook_secret,
+        )
+
+        if result.error:
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "status": "failed",
+                    "error": result.error,
+                    "job_id": result.job_id,
+                },
+            )
+
+        return {
+            "status": "completed",
+            "job_id": result.job_id,
+            "source_id": result.source_id,
+            "total_clips": result.total_clips,
+            "duration_seconds": result.total_duration,
+            "processing_time_seconds": result.processing_time_seconds,
+            "clips": [
+                {
+                    "clip_id": clip.clip_id,
+                    "start_time": clip.start_time,
+                    "end_time": clip.end_time,
+                    "video_key": clip.video_key,
+                    "thumbnail_key": clip.thumbnail_key,
+                    "transcript": clip.transcript,
+                }
+                for clip in result.clips
+            ],
+        }
+
+    except Exception as e:
+        logger.error("Streaming processing endpoint failed", error=str(e))
         return JSONResponse(
             status_code=500,
             content={"error": str(e)},

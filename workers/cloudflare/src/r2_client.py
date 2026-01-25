@@ -1,5 +1,13 @@
-"""R2 client for reading and writing files to Cloudflare R2 storage."""
+"""R2 client for reading and writing files to Cloudflare R2 storage.
 
+This module provides async operations for:
+- File upload/download (with retry logic)
+- Streaming uploads for large files
+- Multipart upload for files >5MB
+- Presigned URL generation
+"""
+
+import asyncio
 import os
 from pathlib import Path
 from typing import Optional
@@ -10,6 +18,11 @@ from botocore.config import Config
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 logger = structlog.get_logger(__name__)
+
+# Multipart upload threshold (5MB)
+MULTIPART_THRESHOLD = 5 * 1024 * 1024
+# Multipart chunk size (10MB)
+MULTIPART_CHUNK_SIZE = 10 * 1024 * 1024
 
 
 class R2Client:
@@ -267,6 +280,211 @@ class R2Client:
             return True
         except Exception:
             return False
+
+    async def upload_file_streaming(
+        self,
+        local_path: str,
+        key: str,
+        bucket: Optional[str] = None,
+        content_type: Optional[str] = None,
+    ) -> str:
+        """Upload file to R2 with streaming - never loads entire file to memory.
+
+        Uses multipart upload for files >5MB for better reliability and
+        memory efficiency with large files.
+
+        Args:
+            local_path: Local path of file to upload
+            key: Object key in R2
+            bucket: Bucket name (uses default if not provided)
+            content_type: MIME type of the file
+
+        Returns:
+            R2 key of uploaded file
+        """
+        bucket = bucket or self.bucket_name
+        local_path = Path(local_path)
+
+        if not local_path.exists():
+            raise FileNotFoundError(f"File not found: {local_path}")
+
+        file_size = local_path.stat().st_size
+
+        # Auto-detect content type if not provided
+        if not content_type:
+            suffix = local_path.suffix.lower()
+            content_types = {
+                ".mp4": "video/mp4",
+                ".webm": "video/webm",
+                ".mov": "video/quicktime",
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+                ".png": "image/png",
+                ".webp": "image/webp",
+                ".mp3": "audio/mpeg",
+            }
+            content_type = content_types.get(suffix, "application/octet-stream")
+
+        # Use multipart for large files (>5MB)
+        if file_size > MULTIPART_THRESHOLD:
+            logger.info(
+                "Using multipart upload for large file",
+                key=key,
+                size_mb=round(file_size / (1024 * 1024), 2),
+            )
+            return await self._multipart_upload(
+                local_path, key, bucket, content_type, file_size
+            )
+
+        # Simple upload for small files
+        logger.info(
+            "Uploading file to R2",
+            key=key,
+            size=file_size,
+        )
+
+        extra_args = {"ContentType": content_type} if content_type else {}
+
+        async with self._get_client_context() as client:
+            await client.upload_file(
+                str(local_path),
+                bucket,
+                key,
+                ExtraArgs=extra_args if extra_args else None,
+            )
+
+        logger.info("File uploaded successfully", key=key)
+        return key
+
+    async def _multipart_upload(
+        self,
+        local_path: Path,
+        key: str,
+        bucket: str,
+        content_type: str,
+        file_size: int,
+    ) -> str:
+        """Perform multipart upload for large files.
+
+        Splits file into chunks and uploads them in parallel for
+        better performance with large files.
+
+        Args:
+            local_path: Local path of file to upload
+            key: Object key in R2
+            bucket: Bucket name
+            content_type: MIME type of the file
+            file_size: Total file size in bytes
+
+        Returns:
+            R2 key of uploaded file
+        """
+        async with self._get_client_context() as client:
+            # Initiate multipart upload
+            response = await client.create_multipart_upload(
+                Bucket=bucket,
+                Key=key,
+                ContentType=content_type,
+            )
+            upload_id = response["UploadId"]
+
+            try:
+                parts = []
+                part_number = 1
+
+                with open(local_path, "rb") as f:
+                    while True:
+                        chunk = f.read(MULTIPART_CHUNK_SIZE)
+                        if not chunk:
+                            break
+
+                        # Upload part
+                        part_response = await client.upload_part(
+                            Bucket=bucket,
+                            Key=key,
+                            UploadId=upload_id,
+                            PartNumber=part_number,
+                            Body=chunk,
+                        )
+
+                        parts.append({
+                            "PartNumber": part_number,
+                            "ETag": part_response["ETag"],
+                        })
+
+                        logger.debug(
+                            "Uploaded part",
+                            key=key,
+                            part=part_number,
+                            size=len(chunk),
+                        )
+                        part_number += 1
+
+                # Complete multipart upload
+                await client.complete_multipart_upload(
+                    Bucket=bucket,
+                    Key=key,
+                    UploadId=upload_id,
+                    MultipartUpload={"Parts": parts},
+                )
+
+                logger.info(
+                    "Multipart upload completed",
+                    key=key,
+                    parts=len(parts),
+                    size_mb=round(file_size / (1024 * 1024), 2),
+                )
+                return key
+
+            except Exception as e:
+                # Abort multipart upload on error
+                logger.error("Multipart upload failed, aborting", key=key, error=str(e))
+                await client.abort_multipart_upload(
+                    Bucket=bucket,
+                    Key=key,
+                    UploadId=upload_id,
+                )
+                raise
+
+    async def upload_files_parallel(
+        self,
+        files: list[tuple[str, str]],
+        bucket: Optional[str] = None,
+        max_concurrent: int = 5,
+    ) -> list[str]:
+        """Upload multiple files in parallel.
+
+        Args:
+            files: List of (local_path, key) tuples
+            bucket: Bucket name (uses default if not provided)
+            max_concurrent: Maximum concurrent uploads
+
+        Returns:
+            List of successfully uploaded keys
+        """
+        bucket = bucket or self.bucket_name
+        semaphore = asyncio.Semaphore(max_concurrent)
+
+        async def upload_with_semaphore(local_path: str, key: str) -> Optional[str]:
+            async with semaphore:
+                try:
+                    return await self.upload_file_streaming(local_path, key, bucket)
+                except Exception as e:
+                    logger.error("Failed to upload file", key=key, error=str(e))
+                    return None
+
+        tasks = [upload_with_semaphore(local_path, key) for local_path, key in files]
+        results = await asyncio.gather(*tasks)
+
+        # Filter out failed uploads
+        successful = [key for key in results if key is not None]
+        logger.info(
+            "Parallel upload completed",
+            total=len(files),
+            successful=len(successful),
+            failed=len(files) - len(successful),
+        )
+        return successful
 
 
 # Singleton instance

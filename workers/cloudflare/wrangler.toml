@@ -5,12 +5,33 @@ compatibility_date = "2024-01-01"
 compatibility_flags = ["nodejs_compat"]
 
 # Container configuration (using Durable Objects)
-# Using standard-4 instance for larger video processing (400MB+)
+# Using standard-4 instance: 4 vCPU, 12 GiB memory, 20 GB disk
+# Memory budget: ~6GB processing (streaming buffer 100MB + FFmpeg 2-4GB + PySceneDetect 1GB)
+# This provides 50% headroom for large video processing (500MB+)
 [[containers]]
 class_name = "VideoProcessor"
 image = "./Dockerfile"
 max_instances = 5
 instance_type = "standard-4"
+
+# Cloudflare Queues configuration for async video processing
+# Queue-based architecture decouples job submission from processing
+# Enables retry logic and removes timeout pressure from Worker
+[[queues.producers]]
+queue = "video-processing-jobs"
+binding = "VIDEO_QUEUE"
+
+[[queues.consumers]]
+queue = "video-processing-jobs"
+max_batch_size = 1
+max_concurrency = 5
+max_retries = 3
+dead_letter_queue = "video-processing-dlq"
+
+# Dead letter queue for failed jobs
+[[queues.producers]]
+queue = "video-processing-dlq"
+binding = "VIDEO_DLQ"
 
 # Durable Objects binding for the container
 [[durable_objects.bindings]]

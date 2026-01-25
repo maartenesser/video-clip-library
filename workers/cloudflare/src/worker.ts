@@ -5,7 +5,7 @@
 
 import { DurableObject } from "cloudflare:workers";
 
-// Extend the Env interface to include secrets (accessed at runtime)
+// Extend the Env interface to include secrets and queues (accessed at runtime)
 interface ExtendedEnv extends Env {
   OPENAI_API_KEY: string;
   R2_ACCESS_KEY_ID: string;
@@ -14,11 +14,137 @@ interface ExtendedEnv extends Env {
   WEBHOOK_SECRET: string;
   SUPABASE_URL: string;
   SUPABASE_SERVICE_KEY: string;
+  // Cloudflare Queue bindings
+  VIDEO_QUEUE?: Queue<QueueMessage>;
+  VIDEO_DLQ?: Queue<QueueMessage>;
 }
+
+// Queue message type
+interface QueueMessage {
+  source_id: string;
+  video_url: string;  // Presigned URL
+  video_key: string;  // Original R2 key
+  webhook_url: string;
+  min_clip_duration?: number;
+  max_clip_duration?: number;
+  min_scene_length?: number;
+  submitted_at: string;
+  use_streaming: boolean;
+}
+
+// Large file threshold (100MB) - use streaming pipeline for files larger than this
+const LARGE_FILE_THRESHOLD = 100 * 1024 * 1024;
 
 // Helper to delay for a given number of milliseconds
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Generate a presigned URL for downloading an object from R2.
+ * Uses AWS Signature V4 compatible with Cloudflare R2.
+ */
+async function generatePresignedUrl(
+  env: ExtendedEnv,
+  key: string,
+  expiresIn: number = 3600
+): Promise<string> {
+  const accountId = env.R2_ACCOUNT_ID;
+  const accessKeyId = env.R2_ACCESS_KEY_ID;
+  const secretAccessKey = env.R2_SECRET_ACCESS_KEY;
+  const bucketName = 'video-clips';
+  const region = 'auto';
+  const service = 's3';
+
+  const host = `${accountId}.r2.cloudflarestorage.com`;
+  const endpoint = `https://${host}`;
+
+  // Current time for signature
+  const now = new Date();
+  const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, '');
+  const dateStamp = amzDate.slice(0, 8);
+
+  // Expiration timestamp
+  const expiresAt = Math.floor(now.getTime() / 1000) + expiresIn;
+
+  // Canonical request components
+  const method = 'GET';
+  const canonicalUri = `/${bucketName}/${key}`;
+  const signedHeaders = 'host';
+
+  // Query parameters for presigned URL
+  const credential = `${accessKeyId}/${dateStamp}/${region}/${service}/aws4_request`;
+  const queryParams = new URLSearchParams({
+    'X-Amz-Algorithm': 'AWS4-HMAC-SHA256',
+    'X-Amz-Credential': credential,
+    'X-Amz-Date': amzDate,
+    'X-Amz-Expires': expiresIn.toString(),
+    'X-Amz-SignedHeaders': signedHeaders,
+  });
+
+  // Sort query params for canonical request
+  queryParams.sort();
+  const canonicalQueryString = queryParams.toString();
+
+  // Canonical headers
+  const canonicalHeaders = `host:${host}\n`;
+
+  // Create canonical request
+  const payloadHash = 'UNSIGNED-PAYLOAD';
+  const canonicalRequest = [
+    method,
+    canonicalUri,
+    canonicalQueryString,
+    canonicalHeaders,
+    signedHeaders,
+    payloadHash,
+  ].join('\n');
+
+  // Create string to sign
+  const algorithm = 'AWS4-HMAC-SHA256';
+  const credentialScope = `${dateStamp}/${region}/${service}/aws4_request`;
+
+  const encoder = new TextEncoder();
+  const canonicalRequestHash = await crypto.subtle.digest(
+    'SHA-256',
+    encoder.encode(canonicalRequest)
+  );
+  const canonicalRequestHashHex = Array.from(new Uint8Array(canonicalRequestHash))
+    .map(b => b.toString(16).padStart(2, '0'))
+    .join('');
+
+  const stringToSign = [
+    algorithm,
+    amzDate,
+    credentialScope,
+    canonicalRequestHashHex,
+  ].join('\n');
+
+  // Calculate signature
+  async function hmacSha256(key: ArrayBuffer, message: string): Promise<ArrayBuffer> {
+    const cryptoKey = await crypto.subtle.importKey(
+      'raw',
+      key,
+      { name: 'HMAC', hash: 'SHA-256' },
+      false,
+      ['sign']
+    );
+    return crypto.subtle.sign('HMAC', cryptoKey, encoder.encode(message));
+  }
+
+  const kDate = await hmacSha256(encoder.encode('AWS4' + secretAccessKey), dateStamp);
+  const kRegion = await hmacSha256(kDate, region);
+  const kService = await hmacSha256(kRegion, service);
+  const kSigning = await hmacSha256(kService, 'aws4_request');
+  const signature = await hmacSha256(kSigning, stringToSign);
+
+  const signatureHex = Array.from(new Uint8Array(signature))
+    .map(b => b.toString(16).padStart(2, '0'))
+    .join('');
+
+  // Construct final URL
+  queryParams.set('X-Amz-Signature', signatureHex);
+  return `${endpoint}${canonicalUri}?${queryParams.toString()}`;
 }
 
 /**
@@ -547,6 +673,56 @@ function getTranscriptForClip(
 }
 
 /**
+ * Process a queued video processing job.
+ * Called by the queue consumer.
+ */
+async function processQueuedJob(
+  message: QueueMessage,
+  env: ExtendedEnv,
+): Promise<void> {
+  console.log('Processing queued job:', {
+    source_id: message.source_id,
+    video_key: message.video_key,
+    use_streaming: message.use_streaming,
+  });
+
+  // Get container stub
+  const instanceId = 'default-v8';
+  const id = env.VIDEO_PROCESSOR.idFromName(instanceId);
+  const stub = env.VIDEO_PROCESSOR.get(id);
+
+  // Determine which endpoint to use based on file size
+  const endpoint = message.use_streaming ? '/process-streaming' : '/process-url';
+
+  const containerRequest = new Request(`http://container${endpoint}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      video_url: message.video_url,
+      source_id: message.source_id,
+      webhook_url: message.webhook_url,
+      min_clip_duration: message.min_clip_duration ?? 3.0,
+      max_clip_duration: message.max_clip_duration ?? 20.0,
+      min_scene_length: message.min_scene_length ?? 1.5,
+      webhook_secret: env.WEBHOOK_SECRET,
+    }),
+  });
+
+  const response = await stub.fetch(containerRequest);
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Container processing failed: ${errorText}`);
+  }
+
+  const result = await response.json() as { status?: string };
+  console.log('Queued job completed:', {
+    source_id: message.source_id,
+    status: result.status || 'completed',
+  });
+}
+
+/**
  * Main Worker fetch handler.
  * Routes requests to appropriate Durable Object instances.
  */
@@ -580,7 +756,99 @@ export default {
       });
     }
 
-    // NEW: Full orchestration endpoint - Worker handles R2 + container + webhook
+    // NEW: Queue-based async processing endpoint for large files
+    // Returns immediately with status "queued" - processing happens in queue consumer
+    if (url.pathname === '/process-async' && request.method === 'POST') {
+      try {
+        const body = await request.json() as ProcessRequest;
+        console.log('Received async process request:', JSON.stringify(body));
+
+        const { source_id, video_url, webhook_url } = body;
+
+        // Check if queue is available
+        if (!env.VIDEO_QUEUE) {
+          return new Response(JSON.stringify({
+            error: 'Queue not configured',
+            details: 'VIDEO_QUEUE binding not available. Use /process endpoint instead.',
+          }), {
+            status: 503,
+            headers: { 'Content-Type': 'application/json', ...corsHeaders },
+          });
+        }
+
+        // Verify video exists in R2
+        const r2Object = await env.VIDEO_BUCKET.head(video_url);
+        if (!r2Object) {
+          return new Response(JSON.stringify({
+            error: 'Video not found in R2',
+            key: video_url,
+          }), {
+            status: 404,
+            headers: { 'Content-Type': 'application/json', ...corsHeaders },
+          });
+        }
+
+        const fileSize = r2Object.size;
+        const useStreaming = fileSize > LARGE_FILE_THRESHOLD;
+
+        console.log('Video found in R2', {
+          key: video_url,
+          size: fileSize,
+          size_mb: Math.round(fileSize / (1024 * 1024)),
+          use_streaming: useStreaming,
+        });
+
+        // Generate presigned URL with 2-hour expiry for large files
+        const expiresIn = useStreaming ? 7200 : 3600; // 2 hours for large, 1 hour for small
+        const presignedUrl = await generatePresignedUrl(env, video_url, expiresIn);
+
+        // Submit job to queue
+        const queueMessage: QueueMessage = {
+          source_id,
+          video_url: presignedUrl,
+          video_key: video_url,
+          webhook_url,
+          min_clip_duration: body.min_clip_duration,
+          max_clip_duration: body.max_clip_duration,
+          min_scene_length: body.min_scene_length,
+          submitted_at: new Date().toISOString(),
+          use_streaming: useStreaming,
+        };
+
+        await env.VIDEO_QUEUE.send(queueMessage);
+
+        console.log('Job submitted to queue', {
+          source_id,
+          video_key: video_url,
+          use_streaming: useStreaming,
+        });
+
+        // Return immediately
+        return new Response(JSON.stringify({
+          status: 'queued',
+          source_id,
+          message: `Video processing job queued. Using ${useStreaming ? 'streaming' : 'standard'} pipeline.`,
+          file_size_mb: Math.round(fileSize / (1024 * 1024)),
+          use_streaming: useStreaming,
+        }), {
+          status: 202,
+          headers: { 'Content-Type': 'application/json', ...corsHeaders },
+        });
+
+      } catch (error) {
+        console.error('Async process endpoint error:', error);
+        return new Response(JSON.stringify({
+          error: 'Failed to queue job',
+          details: error instanceof Error ? error.message : String(error),
+        }), {
+          status: 500,
+          headers: { 'Content-Type': 'application/json', ...corsHeaders },
+        });
+      }
+    }
+
+    // Original: Full orchestration endpoint - Worker handles R2 + container + webhook
+    // For smaller files or when queue is not needed
     if (url.pathname === '/process' && request.method === 'POST') {
       try {
         const body = await request.json() as ProcessRequest;
@@ -595,9 +863,9 @@ export default {
         const webhookParsed = new URL(webhook_url);
         const appBaseUrl = `${webhookParsed.protocol}//${webhookParsed.host}`;
 
-        // Step 1: Download video from R2 using binding
-        console.log('Step 1: Downloading video from R2:', video_url);
-        const r2Object = await env.VIDEO_BUCKET.get(video_url);
+        // Step 1: Verify video exists in R2 and generate presigned URL
+        console.log('Step 1: Verifying video exists in R2:', video_url);
+        const r2Object = await env.VIDEO_BUCKET.head(video_url);
 
         if (!r2Object) {
           console.error('Video not found in R2:', video_url);
@@ -610,23 +878,31 @@ export default {
           });
         }
 
-        const videoBytes = await r2Object.arrayBuffer();
-        console.log('Downloaded video, size:', videoBytes.byteLength);
+        console.log('Video found in R2, size:', r2Object.size);
 
-        // Step 2: Send video to container for processing
-        console.log('Step 2: Sending video to container for local processing');
+        // Generate presigned URL for the container to download
+        const presignedUrl = await generatePresignedUrl(env, video_url, 3600);
+        console.log('Generated presigned URL for container');
+
+        // Step 2: Send presigned URL to container for processing
+        console.log('Step 2: Sending presigned URL to container for processing');
         const instanceId = 'default-v8';
         const id = env.VIDEO_PROCESSOR.idFromName(instanceId);
         const stub = env.VIDEO_PROCESSOR.get(id);
 
         const containerUrl = new URL(request.url);
-        containerUrl.pathname = '/process-local';
-        containerUrl.search = `?source_id=${encodeURIComponent(source_id)}&min_clip_duration=${min_clip_duration}&max_clip_duration=${max_clip_duration}&min_scene_length=${min_scene_length}`;
+        containerUrl.pathname = '/process-url';
 
         const containerRequest = new Request(containerUrl.toString(), {
           method: 'POST',
-          headers: { 'Content-Type': 'application/octet-stream' },
-          body: videoBytes,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            video_url: presignedUrl,
+            source_id,
+            min_clip_duration,
+            max_clip_duration,
+            min_scene_length,
+          }),
         });
 
         const containerResponse = await stub.fetch(containerRequest);
@@ -801,7 +1077,9 @@ export default {
         url.pathname.startsWith('/ready') ||
         url.pathname.startsWith('/jobs') ||
         url.pathname.startsWith('/debug') ||
-        url.pathname.startsWith('/process-local')) {
+        url.pathname.startsWith('/process-local') ||
+        url.pathname.startsWith('/process-url') ||
+        url.pathname.startsWith('/process-streaming')) {
 
       // Use a single instance for now to simplify debugging
       const instanceId = 'default-v8';
@@ -897,3 +1175,46 @@ async function callWebhook(
     return false;
   }
 }
+
+// Re-export with queue handler for Cloudflare Queues support
+// The queue consumer processes video jobs asynchronously
+export const queue = {
+  async queue(
+    batch: MessageBatch<QueueMessage>,
+    env: ExtendedEnv,
+  ): Promise<void> {
+    console.log(`Processing ${batch.messages.length} queued jobs`);
+
+    for (const message of batch.messages) {
+      try {
+        await processQueuedJob(message.body, env);
+        message.ack();
+        console.log('Job completed and acknowledged:', message.body.source_id);
+      } catch (error) {
+        console.error('Job failed:', {
+          source_id: message.body.source_id,
+          error: error instanceof Error ? error.message : String(error),
+          attempts: message.attempts,
+        });
+
+        // Retry if under max retries (3), otherwise ack to prevent infinite loop
+        if (message.attempts < 3) {
+          message.retry();
+          console.log('Job scheduled for retry:', message.body.source_id);
+        } else {
+          // Send to DLQ if available
+          if (env.VIDEO_DLQ) {
+            await env.VIDEO_DLQ.send({
+              ...message.body,
+              error: error instanceof Error ? error.message : String(error),
+              failed_at: new Date().toISOString(),
+            } as any);
+            console.log('Job sent to dead letter queue:', message.body.source_id);
+          }
+          message.ack();
+          console.error('Job exhausted retries, giving up:', message.body.source_id);
+        }
+      }
+    }
+  },
+};

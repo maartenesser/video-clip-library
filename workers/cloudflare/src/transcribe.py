@@ -1,5 +1,13 @@
-"""Transcription module using OpenAI Whisper API."""
+"""Transcription module using OpenAI Whisper API.
 
+Supports:
+- Direct transcription for files <25MB
+- Chunked transcription for larger files (splits into 10-min segments)
+- Word-level and segment-level timestamps
+"""
+
+import asyncio
+import math
 import os
 import subprocess
 import tempfile
@@ -16,6 +24,8 @@ logger = structlog.get_logger(__name__)
 
 # Maximum file size for Whisper API (25MB)
 MAX_AUDIO_SIZE_MB = 25
+# Chunk duration for splitting large audio files (10 minutes)
+CHUNK_DURATION_SECONDS = 600
 
 
 class TranscriptionError(Exception):
@@ -213,8 +223,238 @@ class Transcriber:
             except Exception as e:
                 logger.warning("Failed to clean up temp audio", error=str(e))
 
+    async def transcribe_chunked(
+        self,
+        audio_path: str,
+        language: Optional[str] = None,
+    ) -> TranscriptResult:
+        """Transcribe audio file, automatically chunking if >25MB.
 
-# Convenience function
+        For large audio files that exceed Whisper's 25MB limit, this method
+        splits the audio into 10-minute chunks, transcribes each separately,
+        and merges the results with adjusted timestamps.
+
+        Args:
+            audio_path: Path to audio file
+            language: Optional language code
+
+        Returns:
+            TranscriptResult with full text, segments, and word timestamps
+        """
+        audio_path = Path(audio_path)
+        if not audio_path.exists():
+            raise FileNotFoundError(f"Audio file not found: {audio_path}")
+
+        file_size_mb = audio_path.stat().st_size / (1024 * 1024)
+
+        if file_size_mb <= MAX_AUDIO_SIZE_MB:
+            logger.info(
+                "Audio file within size limit, using direct transcription",
+                size_mb=round(file_size_mb, 2),
+            )
+            return await self.transcribe_audio(str(audio_path), language)
+
+        logger.info(
+            "Audio file exceeds 25MB limit, using chunked transcription",
+            size_mb=round(file_size_mb, 2),
+        )
+
+        # Get audio duration
+        duration = await self._get_audio_duration(str(audio_path))
+        num_chunks = math.ceil(duration / CHUNK_DURATION_SECONDS)
+
+        logger.info(
+            "Splitting audio into chunks",
+            duration=duration,
+            num_chunks=num_chunks,
+            chunk_duration=CHUNK_DURATION_SECONDS,
+        )
+
+        all_segments: list[TranscriptSegment] = []
+        all_words: list[WordTimestamp] = []
+        all_text_parts: list[str] = []
+        detected_language = language
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for i in range(num_chunks):
+                start_time = i * CHUNK_DURATION_SECONDS
+                chunk_path = Path(temp_dir) / f"chunk_{i:03d}.mp3"
+
+                # Extract chunk
+                await self._extract_audio_chunk(
+                    str(audio_path),
+                    str(chunk_path),
+                    start_time,
+                    CHUNK_DURATION_SECONDS,
+                )
+
+                # Transcribe chunk
+                logger.info(
+                    "Transcribing chunk",
+                    chunk=i + 1,
+                    total=num_chunks,
+                    start_time=start_time,
+                )
+
+                try:
+                    chunk_result = await self.transcribe_audio(str(chunk_path), language)
+
+                    # Adjust timestamps and add to results
+                    for segment in chunk_result.segments:
+                        adjusted_segment = TranscriptSegment(
+                            text=segment.text,
+                            start=segment.start + start_time,
+                            end=segment.end + start_time,
+                            words=[
+                                WordTimestamp(
+                                    word=w.word,
+                                    start=w.start + start_time,
+                                    end=w.end + start_time,
+                                )
+                                for w in segment.words
+                            ],
+                        )
+                        all_segments.append(adjusted_segment)
+
+                    for word in chunk_result.words:
+                        adjusted_word = WordTimestamp(
+                            word=word.word,
+                            start=word.start + start_time,
+                            end=word.end + start_time,
+                        )
+                        all_words.append(adjusted_word)
+
+                    all_text_parts.append(chunk_result.full_text)
+
+                    # Use detected language from first chunk
+                    if detected_language is None:
+                        detected_language = chunk_result.language
+
+                except Exception as e:
+                    logger.error(
+                        "Failed to transcribe chunk",
+                        chunk=i + 1,
+                        error=str(e),
+                    )
+                    # Continue with other chunks
+
+        result = TranscriptResult(
+            full_text=" ".join(all_text_parts),
+            language=detected_language or "en",
+            duration=duration,
+            segments=all_segments,
+            words=all_words,
+        )
+
+        logger.info(
+            "Chunked transcription completed",
+            total_segments=len(all_segments),
+            total_words=len(all_words),
+            duration=duration,
+        )
+
+        return result
+
+    async def _get_audio_duration(self, audio_path: str) -> float:
+        """Get audio file duration using FFprobe.
+
+        Args:
+            audio_path: Path to audio file
+
+        Returns:
+            Duration in seconds
+        """
+        import json
+
+        cmd = [
+            "ffprobe",
+            "-v", "quiet",
+            "-print_format", "json",
+            "-show_format",
+            audio_path,
+        ]
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+
+        if result.returncode != 0:
+            raise TranscriptionError(f"FFprobe error: {result.stderr}")
+
+        data = json.loads(result.stdout)
+        return float(data.get("format", {}).get("duration", 0))
+
+    async def _extract_audio_chunk(
+        self,
+        input_path: str,
+        output_path: str,
+        start_time: float,
+        duration: float,
+    ) -> None:
+        """Extract a chunk of audio from a file.
+
+        Args:
+            input_path: Path to source audio
+            output_path: Path for output chunk
+            start_time: Start time in seconds
+            duration: Duration in seconds
+        """
+        cmd = [
+            "ffmpeg",
+            "-ss", str(start_time),
+            "-i", input_path,
+            "-t", str(duration),
+            "-acodec", "libmp3lame",
+            "-ar", "16000",
+            "-ac", "1",
+            "-b:a", "64k",
+            "-y",
+            output_path,
+        ]
+
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+        if result.returncode != 0:
+            raise TranscriptionError(f"FFmpeg chunk extraction error: {result.stderr}")
+
+    async def transcribe_video_chunked(
+        self,
+        video_path: str,
+        language: Optional[str] = None,
+    ) -> TranscriptResult:
+        """Transcribe a video file with automatic chunking for large files.
+
+        Extracts audio first, then uses chunked transcription if needed.
+
+        Args:
+            video_path: Path to video file
+            language: Optional language code
+
+        Returns:
+            TranscriptResult with full text, segments, and word timestamps
+        """
+        logger.info("Starting chunked video transcription", video=video_path)
+
+        # Extract audio
+        audio_path = await self.extract_audio(video_path)
+
+        try:
+            # Use chunked transcription (handles both small and large files)
+            result = await self.transcribe_chunked(audio_path, language)
+            return result
+        finally:
+            # Clean up temp audio file
+            try:
+                Path(audio_path).unlink()
+                Path(audio_path).parent.rmdir()
+            except Exception as e:
+                logger.warning("Failed to clean up temp audio", error=str(e))
+
+
+# Convenience functions
 async def transcribe_video(video_path: str, language: Optional[str] = None) -> TranscriptResult:
     """Transcribe a video file using OpenAI Whisper API.
 
@@ -227,3 +467,40 @@ async def transcribe_video(video_path: str, language: Optional[str] = None) -> T
     """
     transcriber = Transcriber()
     return await transcriber.transcribe_video(video_path, language)
+
+
+async def transcribe_video_chunked(
+    video_path: str,
+    language: Optional[str] = None,
+) -> TranscriptResult:
+    """Transcribe a video file with automatic chunking for large files.
+
+    This function handles videos that produce audio files >25MB
+    by splitting them into 10-minute chunks for the Whisper API.
+
+    Args:
+        video_path: Path to video file
+        language: Optional language code
+
+    Returns:
+        TranscriptResult with word-level timestamps
+    """
+    transcriber = Transcriber()
+    return await transcriber.transcribe_video_chunked(video_path, language)
+
+
+async def transcribe_audio_chunked(
+    audio_path: str,
+    language: Optional[str] = None,
+) -> TranscriptResult:
+    """Transcribe an audio file with automatic chunking if >25MB.
+
+    Args:
+        audio_path: Path to audio file
+        language: Optional language code
+
+    Returns:
+        TranscriptResult with word-level timestamps
+    """
+    transcriber = Transcriber()
+    return await transcriber.transcribe_chunked(audio_path, language)

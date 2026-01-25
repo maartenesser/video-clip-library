@@ -26,7 +26,7 @@ class TestVideoPipeline:
         with patch("src.pipeline.get_r2_client", return_value=mock_r2_client):
             pipeline = VideoPipeline()
 
-            assert pipeline.output_bucket == "processed-clips"
+            assert pipeline.output_bucket == "video-clips"
             assert pipeline.scene_detector is not None
             assert pipeline.video_splitter is not None
 
@@ -43,29 +43,27 @@ class TestVideoPipeline:
     async def test_download_video_with_url(self, mock_r2_client, temp_dir):
         """Test downloading video from full URL."""
         pipeline = VideoPipeline(r2_client=mock_r2_client)
-        mock_r2_client.download_file = AsyncMock(
-            return_value=f"{temp_dir}/video.mp4"
-        )
+        mock_r2_client.download_file = AsyncMock(return_value=None)
 
         result = await pipeline.download_video(
             "https://r2.example.com/bucket/videos/test.mp4",
             temp_dir,
         )
 
-        assert result == f"{temp_dir}/video.mp4"
+        # Pipeline uses "source.mp4" as the local filename
+        assert result == f"{temp_dir}/source.mp4"
         mock_r2_client.download_file.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_download_video_with_key(self, mock_r2_client, temp_dir):
         """Test downloading video from key."""
         pipeline = VideoPipeline(r2_client=mock_r2_client)
-        mock_r2_client.download_file = AsyncMock(
-            return_value=f"{temp_dir}/video.mp4"
-        )
+        mock_r2_client.download_file = AsyncMock(return_value=None)
 
         result = await pipeline.download_video("videos/test.mp4", temp_dir)
 
-        assert result == f"{temp_dir}/video.mp4"
+        # Pipeline uses "source.mp4" as the local filename
+        assert result == f"{temp_dir}/source.mp4"
 
     @pytest.mark.asyncio
     async def test_upload_clips(self, mock_r2_client, sample_clip_results):
@@ -75,17 +73,19 @@ class TestVideoPipeline:
         urls = await pipeline.upload_clips(sample_clip_results, "test_source")
 
         assert len(urls) == 2
-        assert all(isinstance(u, tuple) and len(u) == 2 for u in urls)
+        # upload_clips returns list of dicts with video_url, thumbnail_url, video_key, thumbnail_key
+        assert all(isinstance(u, dict) and "video_url" in u and "thumbnail_url" in u for u in urls)
 
     @pytest.mark.asyncio
     async def test_call_webhook_success(self):
         """Test successful webhook call."""
         pipeline = VideoPipeline()
-        payload = WebhookPayload(
-            job_id="test-job",
-            source_id="test-source",
-            status=ProcessingStatus.COMPLETED,
-        )
+        # call_webhook expects a dict, not WebhookPayload
+        payload = {
+            "job_id": "test-job",
+            "source_id": "test-source",
+            "status": "completed",
+        }
 
         with patch("httpx.AsyncClient") as MockClient:
             mock_client = AsyncMock()
@@ -105,11 +105,12 @@ class TestVideoPipeline:
     async def test_call_webhook_retry_on_failure(self):
         """Test webhook retries on failure."""
         pipeline = VideoPipeline()
-        payload = WebhookPayload(
-            job_id="test-job",
-            source_id="test-source",
-            status=ProcessingStatus.COMPLETED,
-        )
+        # call_webhook expects a dict, not WebhookPayload
+        payload = {
+            "job_id": "test-job",
+            "source_id": "test-source",
+            "status": "completed",
+        }
 
         with patch("httpx.AsyncClient") as MockClient:
             mock_client = AsyncMock()
@@ -137,13 +138,16 @@ class TestVideoPipeline:
         temp_dir,
     ):
         """Test full pipeline execution with mocks."""
-        from src.models import SceneBoundary
+        from src.models import SceneBoundary, ClipEmbeddingModel, ClipGroupModel
 
-        # Create pipeline with mocked components
-        pipeline = VideoPipeline(r2_client=mock_r2_client)
+        # Create pipeline with mocked components and disable quality analysis
+        pipeline = VideoPipeline(
+            r2_client=mock_r2_client,
+            enable_quality_analysis=False,  # Disable to avoid API calls
+        )
 
         # Mock download to return our sample video
-        mock_r2_client.download_file = AsyncMock(return_value=sample_video_path)
+        mock_r2_client.download_file = AsyncMock(return_value=None)
 
         # Mock transcriber
         mock_transcriber = MagicMock()
@@ -253,7 +257,9 @@ class TestVideoPipeline:
             # Webhook should still be called with error status
             mock_webhook.assert_called_once()
             call_args = mock_webhook.call_args[0]
-            assert call_args[1].status == ProcessingStatus.FAILED
+            # call_webhook receives (url, payload_dict), so payload is at index 1
+            payload = call_args[1]
+            assert payload["status"] == ProcessingStatus.FAILED.value
 
 
 class TestPipelineResult:
