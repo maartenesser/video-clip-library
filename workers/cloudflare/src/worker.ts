@@ -1115,6 +1115,46 @@ export default {
       },
     });
   },
+
+  // Queue consumer for async video processing
+  async queue(
+    batch: MessageBatch<QueueMessage>,
+    env: ExtendedEnv,
+  ): Promise<void> {
+    console.log(`Processing ${batch.messages.length} queued jobs`);
+
+    for (const message of batch.messages) {
+      try {
+        await processQueuedJob(message.body, env);
+        message.ack();
+        console.log('Job completed and acknowledged:', message.body.source_id);
+      } catch (error) {
+        console.error('Job failed:', {
+          source_id: message.body.source_id,
+          error: error instanceof Error ? error.message : String(error),
+          attempts: message.attempts,
+        });
+
+        // Retry if under max retries (3), otherwise ack to prevent infinite loop
+        if (message.attempts < 3) {
+          message.retry();
+          console.log('Job scheduled for retry:', message.body.source_id);
+        } else {
+          // Send to DLQ if available
+          if (env.VIDEO_DLQ) {
+            await env.VIDEO_DLQ.send({
+              ...message.body,
+              error: error instanceof Error ? error.message : String(error),
+              failed_at: new Date().toISOString(),
+            } as QueueMessage);
+            console.log('Job sent to dead letter queue:', message.body.source_id);
+          }
+          message.ack();
+          console.error('Job exhausted retries, giving up:', message.body.source_id);
+        }
+      }
+    }
+  },
 };
 
 /**
@@ -1176,45 +1216,3 @@ async function callWebhook(
   }
 }
 
-// Re-export with queue handler for Cloudflare Queues support
-// The queue consumer processes video jobs asynchronously
-export const queue = {
-  async queue(
-    batch: MessageBatch<QueueMessage>,
-    env: ExtendedEnv,
-  ): Promise<void> {
-    console.log(`Processing ${batch.messages.length} queued jobs`);
-
-    for (const message of batch.messages) {
-      try {
-        await processQueuedJob(message.body, env);
-        message.ack();
-        console.log('Job completed and acknowledged:', message.body.source_id);
-      } catch (error) {
-        console.error('Job failed:', {
-          source_id: message.body.source_id,
-          error: error instanceof Error ? error.message : String(error),
-          attempts: message.attempts,
-        });
-
-        // Retry if under max retries (3), otherwise ack to prevent infinite loop
-        if (message.attempts < 3) {
-          message.retry();
-          console.log('Job scheduled for retry:', message.body.source_id);
-        } else {
-          // Send to DLQ if available
-          if (env.VIDEO_DLQ) {
-            await env.VIDEO_DLQ.send({
-              ...message.body,
-              error: error instanceof Error ? error.message : String(error),
-              failed_at: new Date().toISOString(),
-            } as any);
-            console.log('Job sent to dead letter queue:', message.body.source_id);
-          }
-          message.ack();
-          console.error('Job exhausted retries, giving up:', message.body.source_id);
-        }
-      }
-    }
-  },
-};
