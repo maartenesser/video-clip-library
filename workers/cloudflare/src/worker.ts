@@ -248,6 +248,8 @@ export class VideoProcessor extends DurableObject<ExtendedEnv> {
 
     const requestBody = request.body ? await request.arrayBuffer() : null;
 
+    const requestBody = request.body ? await request.arrayBuffer() : null;
+
     // Retry logic - container may take time to be ready after start()
     const maxRetries = 5;
     const retryDelayMs = 2000;
