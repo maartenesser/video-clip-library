@@ -27,13 +27,13 @@
     "review:all": "echo 'Run: @integration-review [feature]' in Claude Code"
   },
   "devDependencies": {
-    "@playwright/test": "^1.40.0",
-    "@playwright/mcp": "latest",
-    "prettier": "^3.1.0",
-    "eslint": "^8.54.0"
+    "@playwright/test": "^1.64.1",
+    "@playwright/mcp": "^0.0.83",
+    "prettier": "^3.9.10",
+    "eslint": "^10.13.0"
   },
   "optionalDependencies": {
-    "@executeautomation/playwright-mcp-server": "latest"
+    "@executeautomation/playwright-mcp-server": "^1.0.12"
   },
   "engines": {
     "node": ">=18.0.0"
