@@ -43,7 +43,7 @@ export function handleError(error: unknown): NextResponse {
     return errorResponse(
       'Validation error',
       400,
-      error.errors.map((e) => ({
+      error.issues.map((e) => ({
         path: e.path.join('.'),
         message: e.message,
       }))

@@ -6,7 +6,7 @@
 import { DurableObject } from "cloudflare:workers";
 
 // Extend the Env interface to include secrets and queues (accessed at runtime)
-interface ExtendedEnv extends Env {
+interface ExtendedEnv extends Omit<Env, 'VIDEO_QUEUE' | 'VIDEO_DLQ'> {
   OPENAI_API_KEY: string;
   R2_ACCESS_KEY_ID: string;
   R2_SECRET_ACCESS_KEY: string;
@@ -121,7 +121,7 @@ async function generatePresignedUrl(
   ].join('\n');
 
   // Calculate signature
-  async function hmacSha256(key: ArrayBuffer, message: string): Promise<ArrayBuffer> {
+  async function hmacSha256(key: BufferSource, message: string): Promise<ArrayBuffer> {
     const cryptoKey = await crypto.subtle.importKey(
       'raw',
       key,
@@ -199,6 +199,7 @@ export class VideoProcessor extends DurableObject<ExtendedEnv> {
       if (!isRunning) {
         console.log('Starting container...');
         await container.start({
+          enableInternet: true,
           env: {
             OPENAI_API_KEY: this.env.OPENAI_API_KEY || '',
             R2_ACCESS_KEY_ID: this.env.R2_ACCESS_KEY_ID || '',
@@ -232,7 +233,7 @@ export class VideoProcessor extends DurableObject<ExtendedEnv> {
     const containerUrl = `http://container${url.pathname}${url.search}`;
 
     // @ts-ignore - Container API is provided by Cloudflare runtime
-    const container = this.ctx.container;
+    const container = this.ctx.container!;
     const port = container.getTcpPort(8080);
 
     const isReady = await this.waitForContainerReady(port);

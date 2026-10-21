@@ -107,7 +107,7 @@ export function TagSelector({
                 >
                   {tag.name}
                   <button
-                    className="ml-1 min-h-[44px] min-w-[44px] -my-2 -mr-1 flex items-center justify-center ring-offset-background rounded-full outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 hover:bg-black/10"
+                    className="ml-1 min-h-[44px] min-w-[44px] -my-2 -mr-1 flex items-center justify-center ring-offset-background rounded-full outline-hidden focus:ring-2 focus:ring-ring focus:ring-offset-2 hover:bg-black/10"
                     onClick={(e) => handleRemoveTag(tag.id, e)}
                     aria-label={`Remove ${tag.name}`}
                   >

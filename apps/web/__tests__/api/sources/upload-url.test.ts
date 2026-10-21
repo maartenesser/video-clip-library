@@ -32,7 +32,7 @@ describe('POST /api/sources/upload-url', () => {
       fileKey: string;
       fileUrl: string;
       expiresIn: number;
-      metadata: object;
+      metadata: { title: string };
     }>(response);
 
     expect(response.status).toBe(201);

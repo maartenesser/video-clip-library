@@ -64,9 +64,9 @@ export async function POST(request: NextRequest) {
       parsedPayload = processingWebhookSchema.parse(rawPayload);
     } catch (parseError) {
       if (parseError instanceof ZodError) {
-        console.error('Webhook payload validation failed:', parseError.errors);
+        console.error('Webhook payload validation failed:', parseError.issues);
         return NextResponse.json(
-          { error: 'Invalid payload', details: parseError.errors },
+          { error: 'Invalid payload', details: parseError.issues },
           { status: 400 }
         );
       }
