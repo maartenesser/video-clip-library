@@ -18,6 +18,7 @@ export const mockSource: Source = {
   creator_name: 'Test Creator',
   original_file_url: 'https://storage.example.com/sources/abc123/original.mp4',
   original_file_key: 'sources/abc123/original.mp4',
+  thumbnail_url: null,
   duration_seconds: 120,
   status: 'completed',
   error_message: null,

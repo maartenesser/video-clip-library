@@ -5,7 +5,7 @@ import { createMockDatabaseClient } from './mocks/database';
 import { createMockStorageClient } from './mocks/storage';
 
 // Set test environment
-process.env.NODE_ENV = 'test';
+(process.env as Record<string, string>).NODE_ENV = 'test';
 
 // Mock environment variables
 process.env.SUPABASE_URL = 'https://test.supabase.co';

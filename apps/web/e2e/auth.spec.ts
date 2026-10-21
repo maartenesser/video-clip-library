@@ -54,8 +54,8 @@ test.describe('Authentication Flow', () => {
 
     await page.fill('input[type="text"]', 'Test User');
     await page.fill('input[type="email"]', 'test@example.com');
-    await page.fill('input[type="password"]').first().fill('password123');
-    await page.fill('input[type="password"]').last().fill('differentpassword');
+    await page.locator('input[type="password"]').first().fill('password123');
+    await page.locator('input[type="password"]').last().fill('differentpassword');
     await page.click('button[type="submit"]');
 
     await expect(page.locator('[class*="destructive"]')).toContainText('Passwords do not match');
