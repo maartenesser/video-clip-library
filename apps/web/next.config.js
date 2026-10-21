@@ -2,11 +2,6 @@
 const nextConfig = {
   transpilePackages: ['@video-clip-library/database', '@video-clip-library/storage'],
 
-  // Next 14 only runs instrumentation.ts behind this flag (eMudhra distrust shim).
-  experimental: {
-    instrumentationHook: true,
-  },
-
   // Image optimization configuration for external images
   images: {
     remotePatterns: [
