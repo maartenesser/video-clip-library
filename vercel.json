@@ -3,10 +3,5 @@
   "buildCommand": "pnpm --filter @video-clip-library/database build && pnpm --filter @video-clip-library/storage build && cd apps/web && pnpm build",
   "installCommand": "pnpm install --frozen-lockfile",
   "framework": "nextjs",
-  "outputDirectory": "apps/web/.next",
-  "functions": {
-    "apps/web/app/api/**/*.ts": {
-      "maxDuration": 300
-    }
-  }
+  "outputDirectory": "apps/web/.next"
 }
