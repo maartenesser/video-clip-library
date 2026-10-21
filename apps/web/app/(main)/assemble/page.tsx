@@ -428,9 +428,9 @@ export default function AssemblePage() {
                         draggedIndex === index && "opacity-50 border-primary"
                       )}
                     >
-                      <GripVertical className="h-5 w-5 text-muted-foreground flex-shrink-0" />
+                      <GripVertical className="h-5 w-5 text-muted-foreground shrink-0" />
                       <div className="flex items-center gap-3 flex-1 min-w-0">
-                        <div className="w-20 h-12 bg-muted rounded overflow-hidden flex-shrink-0">
+                        <div className="w-20 h-12 bg-muted rounded overflow-hidden shrink-0">
                           {clip.thumbnailUrl ? (
                             <img
                               src={clip.thumbnailUrl}
@@ -456,7 +456,7 @@ export default function AssemblePage() {
                         variant="ghost"
                         size="sm"
                         onClick={() => handleRemoveClip(clip.id)}
-                        className="flex-shrink-0"
+                        className="shrink-0"
                       >
                         <Trash2 className="h-4 w-4" />
                       </Button>

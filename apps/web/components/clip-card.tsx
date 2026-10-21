@@ -135,7 +135,7 @@ export function ClipCard({
   return (
     <Card
       className={cn(
-        "overflow-hidden cursor-pointer transition-all hover:shadow-lg hover:border-primary/50 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2",
+        "overflow-hidden cursor-pointer transition-all hover:shadow-lg hover:border-primary/50 focus:outline-hidden focus:ring-2 focus:ring-ring focus:ring-offset-2",
         getGroupBorderColor(groupType),
         getAssemblyStyle(),
         className

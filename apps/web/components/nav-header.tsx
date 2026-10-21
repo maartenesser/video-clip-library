@@ -79,7 +79,7 @@ export function NavHeader() {
   };
 
   return (
-    <header className="sticky top-0 z-50 w-full border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+    <header className="sticky top-0 z-50 w-full border-b bg-background/95 backdrop-blur-sm supports-backdrop-filter:bg-background/60">
       <div className="container flex h-14 items-center">
         {/* Mobile menu button - meets 44x44px touch target */}
         <Sheet open={mobileMenuOpen} onOpenChange={setMobileMenuOpen}>
@@ -147,7 +147,7 @@ export function NavHeader() {
         <div className="mr-4 flex">
           <Link
             href="/"
-            className="mr-6 flex items-center space-x-2 min-h-[44px] px-2 -mx-2 rounded-md focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
+            className="mr-6 flex items-center space-x-2 min-h-[44px] px-2 -mx-2 rounded-md focus:outline-hidden focus:ring-2 focus:ring-ring focus:ring-offset-2"
             aria-label="Video Clip Library - Home"
           >
             <Video className="h-6 w-6" />
