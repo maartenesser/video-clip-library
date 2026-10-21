@@ -12,9 +12,9 @@ export const config = {
      * - _next/static (static files)
      * - _next/image (image optimization files)
      * - favicon.ico (favicon file)
-     * - api/ (API routes - they handle their own auth)
-     * Feel free to modify this pattern to include more paths.
+     * - api/webhooks/ (signed callbacks from the Cloudflare worker)
+     * Every other API route requires a signed-in user (see updateSession).
      */
-    '/((?!_next/static|_next/image|favicon.ico|api/).*)',
+    '/((?!_next/static|_next/image|favicon.ico|api/webhooks/).*)',
   ],
 };

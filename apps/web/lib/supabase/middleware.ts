@@ -72,6 +72,12 @@ export async function updateSession(request: NextRequest) {
     request.nextUrl.pathname === route || request.nextUrl.pathname.startsWith(route + '/')
   ));
 
+  // API routes run with the service-role database client, so they must never be
+  // reachable anonymously. Answer 401 instead of redirecting to the login page.
+  if (!user && request.nextUrl.pathname.startsWith('/api/') && !isDevelopment) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
   // Redirect unauthenticated users to login page for protected routes
   if (!user && !isPublicRoute) {
     const url = request.nextUrl.clone();
