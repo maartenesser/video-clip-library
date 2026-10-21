@@ -7,7 +7,7 @@ vi.mock('@supabase/ssr', () => ({
 }));
 
 import { updateSession } from '@/lib/supabase/middleware';
-import { config } from '@/middleware';
+import { config } from '@/proxy';
 
 const matcher = new RegExp(`^${config.matcher[0]}$`);
 const request = (path: string) => new NextRequest(new URL(path, 'https://app.example'));
